@@ -1,0 +1,119 @@
+[
+  {
+    "Datetime": "2025-03-11T21:50:00+09:00",
+    "Time": "08:50",
+    "Currency": "JPY",
+    "Event": "GDP (QoQ)  (4분기)",
+    "Actual": "",
+    "Forecast": "0.7%",
+    "Previous": "0.3%"
+  },
+  {
+    "Datetime": "2025-03-12T12:00:00+09:00",
+    "Time": "23:00",
+    "Currency": "USD",
+    "Event": "미국 노동부 JOLTS (구인, 이직 보고서)  (1월)",
+    "Actual": "",
+    "Forecast": "7.710M",
+    "Previous": "7.600M"
+  },
+  {
+    "Datetime": "2025-03-12T21:00:00+09:00",
+    "Time": "08:00",
+    "Currency": "KRW",
+    "Event": "한국 실업률  (2월)",
+    "Actual": "",
+    "Forecast": "",
+    "Previous": "2.9%"
+  },
+  {
+    "Datetime": "2025-03-13T10:30:00+09:00",
+    "Time": "21:30",
+    "Currency": "USD",
+    "Event": "근원 소비자물가지수 (MoM)  (2월)",
+    "Actual": "",
+    "Forecast": "0.3%",
+    "Previous": "0.4%"
+  },
+  {
+    "Datetime": "2025-03-13T10:30:00+09:00",
+    "Time": "21:30",
+    "Currency": "USD",
+    "Event": "소비자물가지수 (MoM)  (2월)",
+    "Actual": "",
+    "Forecast": "0.3%",
+    "Previous": "0.5%"
+  },
+  {
+    "Datetime": "2025-03-13T10:30:00+09:00",
+    "Time": "21:30",
+    "Currency": "USD",
+    "Event": "소비자물가지수 (YoY)  (2월)",
+    "Actual": "",
+    "Forecast": "2.9%",
+    "Previous": "3.0%"
+  },
+  {
+    "Datetime": "2025-03-13T11:30:00+09:00",
+    "Time": "22:30",
+    "Currency": "USD",
+    "Event": "원유재고",
+    "Actual": "",
+    "Forecast": "",
+    "Previous": "3.614M"
+  },
+  {
+    "Datetime": "2025-03-13T11:45:00+09:00",
+    "Time": "22:45",
+    "Currency": "CAD",
+    "Event": "금리결정",
+    "Actual": "",
+    "Forecast": "2.75%",
+    "Previous": "3.00%"
+  },
+  {
+    "Datetime": "2025-03-13T21:00:00+09:00",
+    "Time": "08:00",
+    "Currency": "KRW",
+    "Event": "한국 실업률  (2월)",
+    "Actual": "",
+    "Forecast": "",
+    "Previous": "2.9%"
+  },
+  {
+    "Datetime": "2025-03-14T10:30:00+09:00",
+    "Time": "21:30",
+    "Currency": "USD",
+    "Event": "신규 실업수당청구건수",
+    "Actual": "",
+    "Forecast": "226K",
+    "Previous": "221K"
+  },
+  {
+    "Datetime": "2025-03-14T10:30:00+09:00",
+    "Time": "21:30",
+    "Currency": "USD",
+    "Event": "생산자물가지수 (MoM)  (2월)",
+    "Actual": "",
+    "Forecast": "0.3%",
+    "Previous": "0.4%"
+  },
+  {
+    "Datetime": "2025-03-15T05:00:00+09:00",
+    "Time": "16:00",
+    "Currency": "GBP",
+    "Event": "GDP (MoM)  (1월)",
+    "Actual": "",
+    "Forecast": "0.1%",
+    "Previous": "0.4%"
+  },
+  {
+    "Datetime": "2025-03-15T05:00:00+09:00",
+    "Time": "16:00",
+    "Currency": "EUR",
+    "Event": "독일 소비자물가지수 (MoM)  (2월)",
+    "Actual": "",
+    "Forecast": "0.4%",
+    "Previous": "0.4%"
+  }
+]
