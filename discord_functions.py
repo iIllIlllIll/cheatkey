@@ -22,11 +22,12 @@ date_diff_setting = 3
 
 count = 0
 
+blnc_unit = 4
 
-long_target_pnl = 10
+long_target_pnl = 20
 long_stoploss_pnl = 10
 long_pullback_pnl = 3
-long_leverage = 5
+long_leverage = 10
 long_pct = 50
 long_holding = False
 
@@ -50,7 +51,8 @@ variable_list = {
     "short_pullback_pnl",
     "short_leverage",
     "short_pct",
-    "cheat_value"
+    "cheat_value",
+    "blnc_unit"
 }
 
 # 전략 실행 상태
@@ -620,9 +622,14 @@ async def stop(ctx):
         await ctx.send("자동매매가 실행 중이 아닙니다")
 
 @bot.command(name='close')
-async def close_positions(ctx):
+async def close_positions(ctx, side: str = "all"):
     global savemode
-    await ctx.send("정말 하시겠습니까? [Y/n]")
+    side = side.lower()
+    if side not in ["all", "long", "short"]:
+        await ctx.send("잘못된 side입니다. 'long', 'short', 'all' 중 하나를 입력하세요.")
+        return
+
+    await ctx.send(f"정말 {side} 포지션을 청산하시겠습니까? [Y/n]")
 
     def check(m):
         return m.author == ctx.author and m.channel == ctx.channel and m.content.lower() in ['y', 'n']
@@ -632,9 +639,10 @@ async def close_positions(ctx):
         if msg.content.lower() == 'y':
             global is_running
             is_running = False
-            close(symbol)
+            # side 인자를 추가하여 원하는 방향의 포지션만 청산하도록 close() 함수 호출
+            close(symbol, side=side)
             savemode = True
-            await ctx.send(f"{symbol} 포지션이 모두 청산되었습니다.")
+            await ctx.send(f"{symbol}의 {side} 포지션이 청산되었습니다.")
         else:
             await ctx.send("포지션 청산이 취소되었습니다.")
     except asyncio.TimeoutError:
@@ -689,25 +697,35 @@ async def cheat_value_(ctx):
 
 @bot.command(name='setting')
 async def setting(ctx):
-    global waiting, symbol
+    global waiting, symbol, blnc_unit, cheat_value
     global long_target_pnl, long_stoploss_pnl, long_pullback_pnl, long_leverage, long_pct
     global short_target_pnl, short_stoploss_pnl, short_pullback_pnl, short_leverage, short_pct
+
+    pct = 1/blnc_unit*100
 
     embed = discord.Embed(title="Trading Bot Status", color=discord.Color.blue())
     embed.add_field(name="symbol", value=f"{symbol}", inline=True)
     embed.add_field(name="waiting", value=f"{waiting}", inline=True)
-    embed.add_field(name="", value=f"", inline=True)
+    embed.add_field(name="blnc_unit", value=f"{blnc_unit}", inline=True)
+
     embed.add_field(name="🟩target_pnl", value=f"{long_target_pnl}", inline=True)
     embed.add_field(name="🟩stoploss_pnl", value=f"{long_stoploss_pnl}", inline=True)
     embed.add_field(name="🟩pullback_pnl", value=f"{long_pullback_pnl}", inline=True)
-    embed.add_field(name="🟩초기 투자비용 비율", value=f"{long_pct}", inline=True)
+
+    embed.add_field(name="🟩초기 투자비용 비율", value=f"{pct}", inline=True)
     embed.add_field(name="🟩레버리지", value=f"{long_leverage}", inline=True)
     embed.add_field(name="", value=f"", inline=True)
+
     embed.add_field(name="🟥target_pnl", value=f"{short_target_pnl}", inline=True)
     embed.add_field(name="🟥stoploss_pnl", value=f"{short_stoploss_pnl}", inline=True)
     embed.add_field(name="🟥pullback_pnl", value=f"{short_pullback_pnl}", inline=True)
-    embed.add_field(name="🟥초기 투자비용 비율", value=f"{short_pct}", inline=True)
+
+    embed.add_field(name="🟥초기 투자비용 비율", value=f"{pct}", inline=True)
     embed.add_field(name="🟥레버리지", value=f"{short_leverage}", inline=True)
+    embed.add_field(name="", value=f"", inline=True)
+
+    embed.add_field(name="cheat_value", value=f"{cheat_value}", inline=True)
+    embed.add_field(name="", value=f"", inline=True)
     embed.add_field(name="", value=f"", inline=True)
     
 
@@ -981,32 +999,37 @@ async def get_status(ctx):
 @bot.event
 async def on_message(message):
     global long_target_pnl, long_stoploss_pnl, long_pullback_pnl, long_leverage, long_pct
-    global short_target_pnl, short_stoploss_pnl, short_pullback_pnl, short_leverage, short_pct, cheat_value
+    global short_target_pnl, short_stoploss_pnl, short_pullback_pnl, short_leverage, short_pct, cheat_value, blnc_unit
 
     if message.author.bot:
         return
 
-    # set_help 명령어: 변경 가능한 변수 목록 보여주기
-    if message.content.strip() == "set_help":
+    # #set_help 명령어: 변경 가능한 변수 목록 보여주기
+    if message.content.strip() == "#set_help":
         var_names = "\n".join(sorted(variable_list))
-        help_msg = f"변경 가능한 변수 목록:\n{var_names}\n\n사용법: set_<변수명> <값>"
+        help_msg = f"변경 가능한 변수 목록:\n{var_names}\n\n사용법: #set <변수명> <값>"
         await message.channel.send(help_msg)
         return
 
-    # set_ 명령어 처리 (예: set_long_target_pnl 15)
-    if message.content.startswith("set_"):
+    # #set 명령어 처리 (예: #set long_target_pnl 15)
+    if message.content.startswith("#set "):
         try:
             parts = message.content.split()
-            if len(parts) != 2:
-                await message.channel.send("사용법: set_{변수명} <값>")
+            if len(parts) != 3:
+                await message.channel.send("사용법: #set <변수명> <값>")
                 return
 
-            command = parts[0]  # 예: set_long_target_pnl
-            value = int(parts[1])
-            var_name = command[4:]  # 'set_' 제거 → 예: long_target_pnl
+            # parts[0]는 "#set", parts[1]는 변수명, parts[2]는 값
+            var_name = parts[1]
+            try:
+                # 값은 float로 변환 (정수도 float로 변환 가능)
+                value = float(parts[2])
+            except ValueError:
+                await message.channel.send("값은 숫자여야 합니다.")
+                return
 
             if var_name not in variable_list:
-                await message.channel.send("존재하지 않는 변수입니다. 'set_help'로 사용 가능한 변수명을 확인하세요.")
+                await message.channel.send("존재하지 않는 변수입니다. '#set_help'로 사용 가능한 변수명을 확인하세요.")
                 return
 
             # 변수 업데이트
@@ -1032,10 +1055,12 @@ async def on_message(message):
                 short_pct = value
             elif var_name == "cheatkey_value":
                 cheat_value = value
+            elif var_name == 'blnc_unit':
+                blnc_unit = value
 
             await message.channel.send(f"{var_name}가 {value}로 업데이트되었습니다.")
         except Exception as e:
-            await message.channel.send("명령어 사용에 오류가 있습니다. 올바른 형식: set_{변수명} <값>")
+            await message.channel.send("명령어 사용에 오류가 있습니다. 올바른 형식: #set <변수명> <값>")
     await bot.process_commands(message)
 
 
@@ -1045,7 +1070,7 @@ async def start_trading_strategy():
     global is_running, sell_price, sell_date, count, order, waiting, Aicommand
     global loss_amount, savemode
     global long_target_pnl, long_stoploss_pnl, long_pullback_pnl, long_leverage, long_pct, long_holding
-    global short_target_pnl, short_stoploss_pnl, short_pullback_pnl, short_leverage, short_pct, short_holding, cheat_value
+    global short_target_pnl, short_stoploss_pnl, short_pullback_pnl, short_leverage, short_pct, short_holding, cheat_value, blnc_unit
 
     sell_date = datetime.today()
     sell_price = 0
@@ -1172,54 +1197,6 @@ async def start_trading_strategy():
             long_liquidation_price = long_position_info['liquidationPrice']
             short_liquidation_price = short_position_info['liquidationPrice']
 
-            blnc = get_futures_asset_balance()
-
-
-            ###매수알고리즘
-
-            if order is None:
-                current_price_info = client.get_symbol_ticker(symbol=f"{symbol}")
-                current_price = float(current_price_info['price'])
-                if long_holding is False:
-                    if cheatkey(symbol, ema12_period=12, ema26_period=26, interval='15m', threshold=cheat_value, side='long') is True:
-                        if short_holding is False:
-                            long_percentage = long_pct # %
-                        else:
-                            long_percentage = 100*long_pct/(100-long_pct) # %
-                        iquantity = calculate_order_quantity(long_percentage)
-                        order = execute_market_order(symbol,long_percentage*0.99,long_leverage,'BUY')
-                        msg_long = f'''
-## 🚀 매수주문완료
-```
-포지션 : 🟩LONG
-현재가격 : {current_price}
-레버리지 : {short_leverage}
-매수금액 : {iquantity}
-```
-'''
-                        message(msg_long)
-                        long_buytime_list.append(now)
-
-                if short_holding is False:
-                    if cheatkey(symbol, ema12_period=12, ema26_period=26, interval='15m', threshold=cheat_value, side='short') is True:
-                        if long_holding is False:
-                            short_percentage = short_pct # %
-                        else:
-                            short_percentage = 100*short_pct/(100-short_pct) # %
-                        iquantity = calculate_order_quantity(short_percentage)
-                        order = execute_market_order(symbol,short_percentage*0.99,short_leverage,'SELL')
-                        msg_short = f'''
-## 🚀 매수주문완료
-```
-포지션 : 🟥SHORT
-현재가격 : {current_price}
-레버리지 : {short_leverage}
-매수금액 : {iquantity}
-```
-'''
-                        message(msg_short)
-                        short_buytime_list.append(now)
-            
             # min, max pnl 갱신 longshort
             if long_holding is True:
                 if long_pnl < long_min_pnl:
@@ -1229,10 +1206,10 @@ async def start_trading_strategy():
                     long_max_pnl = long_pnl
 
                 if long_buytime_list:
-                    time_diff = now - long_buytime_list[0]
+                    long_time_diff = now - long_buytime_list[0]
                 else:
                     long_buytime_list.append(now)
-                    time_diff = now - long_buytime_list[0]
+                    long_time_diff = now - long_buytime_list[0]
             if short_holding is True:
                 if short_pnl < short_min_pnl:
                     short_min_pnl = short_pnl
@@ -1241,10 +1218,108 @@ async def start_trading_strategy():
                     short_max_pnl = short_pnl
 
                 if short_buytime_list:
-                    long_time_diff = now - short_buytime_list[0]
+                    short_time_diff = now - short_buytime_list[0]
                 else:
                     short_buytime_list.append(now)
                     short_time_diff = now - short_buytime_list[0]
+
+
+
+            blnc = get_futures_asset_balance()
+
+
+            ###매수알고리즘
+
+            if order is None:
+                current_price_info = client.get_symbol_ticker(symbol=f"{symbol}")
+                current_price = float(current_price_info['price'])
+
+
+                unit_usdt = blnc/blnc_unit # 단위 usdt 설정
+
+                if long_holding is False:
+                    if (now.minute)%5 == 3 and cheatkey(symbol, ema12_period=12, ema26_period=26, interval='15m', threshold=cheat_value, side='long') is True:
+                        # 롱 초기매수
+
+                        long_qty = unit_usdt
+                        order = execute_market_order_usdt(symbol,long_qty*0.99,long_leverage,'BUY')
+                        msg_long = f'''
+## 🚀 매수주문완료 #1
+```
+포지션 : 🟩LONG
+현재가격 : {current_price}
+레버리지 : {long_leverage}
+매수금액 : {long_qty}
+```
+'''
+                        msg_long_alert = f'## 🟩LONG | 매수 #1 | 현재가격 : {current_price} | 레버리지 : {long_leverage} | 매수금액 : {long_qty}'
+                        message(msg_long)
+                        message_alert(msg_long_alert)
+                        long_buytime_list.append(now)
+
+                if short_holding is False:
+                    if (now.minute)%5 == 4 and cheatkey(symbol, ema12_period=12, ema26_period=26, interval='15m', threshold=cheat_value, side='short') is True:
+                        # 숏 초기매수
+
+                        short_qty = unit_usdt
+                        order = execute_market_order_usdt(symbol,short_qty*0.99,short_leverage,'SELL')
+                        msg_short = f'''
+## 🚀 매수주문완료 #1
+```
+포지션 : 🟥SHORT
+현재가격 : {current_price}
+레버리지 : {short_leverage}
+매수금액 : {short_qty}
+```
+'''
+                        msg_short_alert = f'## 🟥SHORT | 매수 #1 | 현재가격 : {current_price} | 레버리지 : {short_leverage} | 매수금액 : {short_qty}'
+                        message(msg_short)
+                        message_alert(msg_short_alert)
+                        short_buytime_list.append(now)
+
+                if long_holding is True:
+                    if long_pnl < 0 and (long_time_diff.total_seconds()/60) >= 60:
+                        if (now.minute)%5 == 3 and cheatkey(symbol, ema12_period=12, ema26_period=26, interval='15m', threshold=cheat_value, side='long') is True:
+                            # 롱 추가매수
+                            long_qty = unit_usdt
+                            order = execute_market_order_usdt(symbol,long_qty*0.99,long_leverage,'BUY')
+                            msg_long = f'''
+## 🚀 매수주문완료 #2
+```
+포지션 : 🟩LONG
+현재가격 : {current_price}
+레버리지 : {long_leverage}
+매수금액 : {long_qty}
+```
+'''
+                            msg_long_alert = f'## 🟩LONG | 매수 #2 | 현재가격 : {current_price} | 레버리지 : {long_leverage} | 매수금액 : {long_qty}'
+                            message(msg_long)
+                            message_alert(msg_long_alert)
+                            long_buytime_list.append(now)
+
+                if short_holding is True:
+                    if short_pnl < 0 and (short_time_diff.total_seconds()/60) >= 60:
+                        if (now.minute)%5 == 4 and cheatkey(symbol, ema12_period=12, ema26_period=26, interval='15m', threshold=cheat_value, side='short') is True:
+                            # 숏 추가매수
+                            short_qty = unit_usdt
+                            order = execute_market_order_usdt(symbol,short_qty*0.99,short_leverage,'SELL')
+                            msg_short = f'''
+## 🚀 매수주문완료 #2
+```
+포지션 : 🟥SHORT
+현재가격 : {current_price}
+레버리지 : {short_leverage}
+매수금액 : {short_qty}
+```
+'''
+                            msg_short_alert = f'## 🟥SHORT | 매수 #2 | 현재가격 : {current_price} | 레버리지 : {short_leverage} | 매수금액 : {short_qty}'
+                            message(msg_short)
+                            message_alert(msg_short_alert)
+                            short_buytime_list.append(now)
+
+
+
+            
 
 
             if order is None:
@@ -1253,7 +1328,13 @@ async def start_trading_strategy():
                     if long_pnl >= long_target_pnl:
                         order = close(symbol,side='long')
                         long_savemode = True
-                    if long_pnl >= long_pullback_pnl and long_max_pnl >= long_pullback_pnl+2 and (long_time_diff.total_seconds()/60) >= 15:
+                    if long_max_pnl < long_target_pnl*0.7 and long_pnl >= long_pullback_pnl and long_max_pnl >= long_pullback_pnl+2 and (long_time_diff.total_seconds()/60) >= 60:
+                        order = close(symbol,side='long')
+                        long_savemode = True
+                    if long_max_pnl >= long_target_pnl*0.7 and long_pnl <= long_max_pnl*0.7 and (long_time_diff.total_seconds()/60) >= 60:
+                        order = close(symbol,side='long')
+                        long_savemode = True
+                    if long_min_pnl <= -long_stoploss_pnl*0.5 and long_pnl >= 3 and (long_time_diff.total_seconds()/60) >= 30:
                         order = close(symbol,side='long')
                         long_savemode = True
                     # 손절
@@ -1261,12 +1342,18 @@ async def start_trading_strategy():
                         order = close(symbol,side='long')
                         long_savemode = True
 
-                elif short_holding is True:
+                if short_holding is True:
                     # 익절
                     if short_pnl >= short_target_pnl:
                         order = close(symbol,side='short')
                         short_savemode = True
-                    if short_pnl >= short_pullback_pnl and short_max_pnl >= short_pullback_pnl+2 and (short_time_diff.total_seconds()/60) >= 15:
+                    if short_max_pnl < short_target_pnl*0.7 and short_pnl >= short_pullback_pnl and short_max_pnl >= short_pullback_pnl+2 and (short_time_diff.total_seconds()/60) >= 60:
+                        order = close(symbol,side='short')
+                        short_savemode = True
+                    if short_max_pnl >= short_target_pnl*0.7 and short_pnl <= short_max_pnl*0.7 and (short_time_diff.total_seconds()/60) >= 60:
+                        order = close(symbol,side='short')
+                        short_savemode = True
+                    if short_min_pnl <= -short_stoploss_pnl*0.5 and short_pnl >= 3 and (short_time_diff.total_seconds()/60) >= 30:
                         order = close(symbol,side='short')
                         short_savemode = True
                     # 손절
@@ -1282,8 +1369,11 @@ async def start_trading_strategy():
             if long_savemode is True:
                 result = 'profit' if long_pnl >= 0 else 'loss'
                 time_diff = str(now - long_buytime_list[0])
-                count = 0
+                count = len(long_buytime_list) - 1 if long_buytime_list else 0
                 save_to_db(now, 'long', result, long_leverage, long_unrealizedProfit, long_pnl, long_inv_amount, count, long_max_pnl, long_min_pnl, time_diff)
+
+                msg_long_alert = f'## 🟩LONG | 매도 | 현재가격 : {current_price} | PROFIT : {long_unrealizedProfit} | ROI : {long_pnl}'
+                message_alert(msg_long_alert)
 
                 long_position_list = ['long',long_buytime_list,now]
                 
@@ -1311,6 +1401,7 @@ async def start_trading_strategy():
                 SIDE                 :  {side_}
                 Result               :  {result_}
                 Leverage             :  {long_leverage}
+                Count                :  {count}
                 REALIZED PROFIT      :  {long_unrealizedProfit}
                 ROI                  :  {long_pnl}%
                 Invest Amount        :  {long_inv_amount}
@@ -1331,8 +1422,11 @@ async def start_trading_strategy():
             if short_savemode is True:
                 result = 'profit' if short_pnl >= 0 else 'loss'
                 time_diff = str(now - short_buytime_list[0])
-                count = 0
+                count = len(short_buytime_list) - 1 if short_buytime_list else 0
                 save_to_db(now, 'short', result, short_leverage, short_unrealizedProfit, short_pnl, short_inv_amount, count, short_max_pnl, short_min_pnl, time_diff)
+
+                msg_short_alert = f'## 🟥SHORT | 매도 | 현재가격 : {current_price} | Profit : {short_unrealizedProfit} | ROI : {short_pnl}'
+                message_alert(msg_short_alert)
 
                 short_position_list = ['short',short_buytime_list,now]
                 
@@ -1360,6 +1454,7 @@ async def start_trading_strategy():
                 SIDE                 :  {side_}
                 Result               :  {result_}
                 Leverage             :  {short_leverage}
+                Count                :  {count}
                 REALIZED PROFIT      :  {short_unrealizedProfit}
                 ROI                  :  {short_pnl}%
                 Invest Amount        :  {short_inv_amount}
@@ -1393,6 +1488,8 @@ async def start_trading_strategy():
                 else:
                     short_status = '🟢매수중'
                 blnc = get_futures_asset_balance()
+                long_count = len(long_buytime_list) - 1 if long_buytime_list else 0
+                short_count = len(short_buytime_list) - 1 if short_buytime_list else 0
 
 
 
@@ -1411,6 +1508,7 @@ LONG pnl : {long_pnl}
 매수금액 : {long_inv_amount}
 현재금액 : {long_inv_amount + long_unrealizedProfit}
 레버리지 : {long_leverage}
+Count : {long_count}
 
 # 🟥SHORT
 SHORT 상태 : {short_status}
@@ -1419,6 +1517,7 @@ SHORT pnl : {short_pnl}
 매수금액 : {short_inv_amount}
 현재금액 : {short_inv_amount + short_unrealizedProfit}
 레버리지 : {short_leverage}
+Count : {short_count}
 ```
                 '''
                 message(msg)

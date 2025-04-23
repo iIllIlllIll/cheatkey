@@ -458,6 +458,42 @@ def execute_market_order(symbol, percentage, leverage, side):
     else:
         print(f"주문 수량이 최소 수량 ({min_qty})보다 적습니다.")
 
+def execute_market_order_usdt(symbol, usdt_amount, leverage, side):
+    """
+    :param symbol:    거래 종목 (e.g. 'BTCUSDT')
+    :param usdt_amount:  사용할 USDT 금액 (예: 50 → 50 USDT 어치 주문)
+    :param leverage:  설정할 레버리지 (예: 10)
+    :param side:      주문 방향 ('BUY' : 롱, 'SELL' : 숏)
+    """
+    # 0. 입력값 유효성 검사
+    if usdt_amount <= 0:
+        print("사용할 USDT 금액은 0보다 커야 합니다.")
+        return
+
+    # 1. 현재 시장가(매도 호가) 조회
+    current_price = get_current_market_price(symbol)
+    if current_price is None:
+        print("현재 시장가를 가져올 수 없습니다.")
+        return
+
+    # 2. 최소 주문 수량(Lot size) 조회
+    min_qty = get_min_order_quantity(symbol)
+
+    # 3. 주문 수량 계산: (USDT 금액 / 현재 시장가) * 레버리지
+    raw_size = (usdt_amount / current_price) * leverage
+
+    # 4. stepSize 단위에 맞게 내림 처리
+    size = round_quantity_to_step_size(symbol, raw_size)
+
+    # 5. 최소 수량 이상일 때만 주문
+    if size >= min_qty:
+        order = place_market_order(symbol, size, leverage, side)
+        print(f"{symbol} {side} 시장가 주문 요청: 수량={size}")
+        return order
+    else:
+        print(f"계산된 주문 수량({size})이 최소 수량({min_qty})보다 적습니다.")
+
+
 
 def place_market_order(symbol, quantity, leverage, side):
     # 레버리지 설정
@@ -598,7 +634,6 @@ def close(symbol, side='all'):
                     side=order_side,
                     type='MARKET',
                     quantity=quantity,
-                    reduceOnly=True,
                     positionSide=position_side
                 )
                 print(f"Position for {symbol} closed: {order}")
@@ -637,7 +672,6 @@ def close_usdt(symbol, leverage, usdt, side='all'):
                     side=order_side,
                     type='MARKET',
                     quantity=quantitytoclose,
-                    reduceOnly=True,
                     positionSide=position_side
                 )
                 print(f"Position for {symbol} closed: {order}")
@@ -696,7 +730,7 @@ def message(message):
 def message_alert(message):
     data = {
         "content": message,
-        "username": "CHEATKEY"  # Optional: 설정하지 않으면 기본 웹훅 이름이 사용됩니다.
+        "username": "DATABASE"  # Optional: 설정하지 않으면 기본 웹훅 이름이 사용됩니다.
     }
 
     result = requests.post(webhook_url_alert, json=data)
@@ -968,7 +1002,8 @@ def cheatkey(symbol, ema12_period=12, ema26_period=26, interval='15m', threshold
             'taker_buy_base_asset_volume','taker_buy_quote_asset_volume','ignore'
         ])
         
-        # 문자열을 float으로 변환 (종가 사용)
+        # 문자열을 float으로 변환 (시가, 종가 사용)
+        df['open'] = df['open'].astype(float)
         df['close'] = df['close'].astype(float)
         
         # EMA 계산: pandas의 ewm 사용 (adjust=False)
@@ -981,11 +1016,15 @@ def cheatkey(symbol, ema12_period=12, ema26_period=26, interval='15m', threshold
         previous_ema12 = df.iloc[-2]['ema12']
         previous_ema26 = df.iloc[-2]['ema26']
         
-        # 현재 봉과 이전 봉의 EMA 차이 (절대값)
+        # 현재 봉의 시가와 종가
+        current_open = df.iloc[-1]['open']
+        current_close = df.iloc[-1]['close']
+        
+        # 측정: EMA 차이
         current_diff = abs(current_ema12 - current_ema26)
         previous_diff = abs(previous_ema12 - previous_ema26)
         
-        # side 조건: 롱이면 ema12가 ema26 아래, 숏이면 ema12가 ema26 위에 있어야 함.
+        # side 조건: 롱이면 ema12가 ema26 아래, 숏이면 ema12가 ema26 위
         if side == "long":
             side_condition = (current_ema12 < current_ema26)
         elif side == "short":
@@ -994,7 +1033,22 @@ def cheatkey(symbol, ema12_period=12, ema26_period=26, interval='15m', threshold
             print("Error: side는 'long' 또는 'short'여야 합니다.")
             return False
         
-        # 전체 조건: EMA 차이 감소, 임계값 이하, side 조건 만족
+        # 최근 4개 봉 안에 반대 방향 교차가 발생하지 않아야 함
+        recent_candles = df.iloc[-4:]
+        if side == "long":
+            if not all(recent_candles['ema12'] < recent_candles['ema26']):
+                return False
+        elif side == "short":
+            if not all(recent_candles['ema12'] > recent_candles['ema26']):
+                return False
+        
+        # 봉 방향 확인: 롱은 양봉(종가>시가), 숏은 음봉(종가<시가)
+        if side == "long" and current_close <= current_open:
+            return False
+        if side == "short" and current_close >= current_open:
+            return False
+        
+        # 전체 조건: EMA 차이가 감소하고, 임계값 이하이며, side 조건 만족
         if current_diff < previous_diff and current_diff <= threshold and side_condition:
             return True
         else:
@@ -1002,8 +1056,9 @@ def cheatkey(symbol, ema12_period=12, ema26_period=26, interval='15m', threshold
         
     except Exception as e:
         print("Error:", e)
-        message("Error:", e) 
         return False
+
+
 
 
 def second_analysis(symbol,leverage,side,reason):
