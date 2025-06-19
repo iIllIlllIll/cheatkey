@@ -1598,6 +1598,9 @@ async def start_trading_strategy():
     long_pos_list = []
     short_pos_list = []
 
+    long_sell_timeout = 10
+    short_sell_timeout = 10
+
 
     print("Trading strategy started")
     f.message("자동매매를 시작합니다")
@@ -1691,9 +1694,11 @@ async def start_trading_strategy():
 
                 if long_pnl > long_max_pnl:
                     long_max_pnl = long_pnl
-            else:
+            elif long_holding is False and long_sell_timeout > 5:
                 long_buytime_list = []
                 long_pos_list = []
+                long_Timeout_set = None
+                
 
             if short_holding is True:
                 if short_pnl < short_min_pnl:
@@ -1701,9 +1706,17 @@ async def start_trading_strategy():
 
                 if short_pnl > short_max_pnl:
                     short_max_pnl = short_pnl
-            else:
+            elif short_holding is False and short_sell_timeout > 5:
                 short_buytime_list = []
                 short_pos_list = []
+                short_Timeout_set = None
+
+            if long_sell_timeout <= 5:
+                long_sell_timeout += 1
+            
+            if short_sell_timeout <= 5:
+                short_sell_timeout += 1
+
 
 
 
@@ -1720,8 +1733,7 @@ async def start_trading_strategy():
 
                 if long_holding is False and short_holding is False:
                     unit_usdt = blnc/TOTAL_PARTS # 단위 usdt 설정
-                    long_Timeout_set = None
-                    short_Timeout_set = None
+
 
                 long_count = len(long_pos_list) if long_pos_list else 0
                 short_count = len(short_pos_list) if short_pos_list else 0
@@ -1866,12 +1878,14 @@ async def start_trading_strategy():
 
             ### 매도 로직
 
-            long_diff = now - long_buytime_list[0]
-            minutes_int = float(long_diff.total_seconds() // 60)
 
 
             if order is None:
                 if long_holding is True:
+                    long_diff = now - long_buytime_list[0] if long_buytime_list else 0
+                    long_minutes_int = float(long_diff.total_seconds() // 60) if long_buytime_list else 0
+
+
                     # TP Exit
                     if long_pnl >= LONG_TP_PNL:
                         order = f.close(symbol,side='long')
@@ -1890,7 +1904,7 @@ async def start_trading_strategy():
                         long_savemode = True
 
                     # Slope Exit
-                    elif SLOPE_EXIT and ((now.minute) % 15 == 4 or (now.minute)%15 == 5) and ( minutes_int > 5*SLOPE_EXIT_COOLDOWN_BARS) and ema_slope_exit(symbol,'5m',SLOPE_EXIT_LOOKBACK,'long'):
+                    elif SLOPE_EXIT and ((now.minute) % 15 == 4 or (now.minute)%15 == 5) and ( long_minutes_int > 5*SLOPE_EXIT_COOLDOWN_BARS) and ema_slope_exit(symbol,'5m',SLOPE_EXIT_LOOKBACK,'long'):
                         if  long_pnl >= SLOPE_EXIT_PNL_THRESHOLD:
                             order = f.close(symbol,side='long')
                             long_selltime_list.append(now)
@@ -1980,6 +1994,8 @@ async def start_trading_strategy():
 
             if order is None:
                 if short_holding is True:
+                    short_diff = now - short_buytime_list[0] if short_buytime_list else 0
+                    short_minutes_int = float(short_diff.total_seconds() // 60) if short_buytime_list else 0
                     # TP Exit
                     if short_pnl >= SHORT_TP_PNL:
                         order = f.close(symbol, side='short')
@@ -1998,7 +2014,7 @@ async def start_trading_strategy():
                         short_savemode = True
 
                     # Slope Exit
-                    elif SLOPE_EXIT and ((now.minute) % 15 == 4 or (now.minute)%15 == 5) and ( minutes_int > 5*SLOPE_EXIT_COOLDOWN_BARS) and ema_slope_exit(symbol,'5m',SLOPE_EXIT_LOOKBACK,'short'):
+                    elif SLOPE_EXIT and ((now.minute) % 15 == 4 or (now.minute)%15 == 5) and ( short_minutes_int > 5*SLOPE_EXIT_COOLDOWN_BARS) and ema_slope_exit(symbol,'5m',SLOPE_EXIT_LOOKBACK,'short'):
                         if  short_pnl >= SLOPE_EXIT_PNL_THRESHOLD:
                             order = f.close(symbol,side='short')
                             short_selltime_list.append(now)
@@ -2093,8 +2109,10 @@ async def start_trading_strategy():
             ########## 결과 저장하기 & 디코메세지 보내기
             if long_savemode is True:
                 result = 'profit' if long_pnl >= 0 else 'loss'
+                if not long_buytime_list:
+                    long_buytime_list = [now - timedelta(minutes=10)]
                 time_diff = str(now - long_buytime_list[0])
-                count = len(long_buytime_list) - 1 if long_buytime_list else 0
+                count = len(long_buytime_list) if long_buytime_list else 0
                 f.save_to_db(now, 'long', result, long_leverage, long_unrealizedProfit, long_pnl, long_inv_amount, count, long_max_pnl, long_min_pnl, time_diff)
 
                 msg_long_alert = f'### 🟩 LONG | 매도 | 현재가격 : {current_price} | 💸 PROFIT : {long_unrealizedProfit} USDT | ROI : {long_pnl}%'
@@ -2143,11 +2161,14 @@ async def start_trading_strategy():
                 long_min_pnl = 0
                 long_buytime_list = []
                 long_savemode = False
+                long_sell_timeout = 0
 
             if short_savemode is True:
                 result = 'profit' if short_pnl >= 0 else 'loss'
+                if not short_buytime_list:
+                    short_buytime_list = [now - timedelta(minutes=10)]
                 time_diff = str(now - short_buytime_list[0])
-                count = len(short_buytime_list) - 1 if short_buytime_list else 0
+                count = len(short_buytime_list) if short_buytime_list else 0
                 f.save_to_db(now, 'short', result, short_leverage, short_unrealizedProfit, short_pnl, short_inv_amount, count, short_max_pnl, short_min_pnl, time_diff)
 
                 msg_short_alert = f'### 🟥 SHORT | 매도 | 현재가격 : {current_price} | 💸 Profit : {short_unrealizedProfit} USDT | ROI : {short_pnl}%'
@@ -2196,6 +2217,7 @@ async def start_trading_strategy():
                 short_min_pnl = 0
                 short_buytime_list = []
                 short_savemode = False
+                short_sell_timeout = 0
 
                 
 

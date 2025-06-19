@@ -99,10 +99,6 @@ def ema_slope_exit(symbol: str, interval: str, lookback: int, side: str) -> bool
     df['ema12'] = df['close'].ewm(span=12, adjust=False).mean()
     df['ema26'] = df['close'].ewm(span=26, adjust=False).mean()
     
-    idx = len(df) - 1
-    minute = df.at[idx, "open_time"].minute
-    if minute not in (0,5, 15,20, 30,35, 45,50):
-        return False
 
     # 4) Check slope condition
     sign = -1 if side == "long" else 1
