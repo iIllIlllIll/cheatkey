@@ -63,58 +63,150 @@ geminaiclient = genai.Client(api_key=GEMINI_API_KEY)
 client = Client(api_key, api_secret)
 openaiclient = OpenAI(api_key=openai_api_key)
 
-def ema_slope_exit(symbol: str, interval: str, lookback: int, side: str) -> bool:
-    """
-    Fetch klines, compute EMA12/EMA26, and check slope exit condition for the given side.
+FOUR_H_BB_WIDTH_THRESHOLD = 0.6
+USE_ATR_PERCENT = True
+ATR_PERIODS = 22
+BB_PERIODS = 20
+BB_STDDEV = 2.0
 
-    Args:
-        client: 바이낸스/Bybit API client 인스턴스.
-        symbol: 거래 심볼 (예: "XRPUSDT").
-        interval: 캔들 간격 (예: "5m").
-        lookback: 검사할 직전 봉 개수 (e.g., SLOPE_EXIT_LOOKBACK).
-        side: "long" or "short" (롱 또는 숏 포지션 방향).
-
-    Returns:
-        True if slope exit condition is met for the specified side, False otherwise.
+def bb_4h_condition(
+    symbol: str,
+    threshold: float = FOUR_H_BB_WIDTH_THRESHOLD,
+    use_atr_percent: bool = USE_ATR_PERCENT,
+    atr_periods: int = ATR_PERIODS,
+    bb_periods: int = BB_PERIODS,
+    bb_stddev: float = BB_STDDEV
+) -> bool:
     """
-    # Validate side
+    Returns True if the most recently completed 4-hour bar's Bollinger Band width
+    is below `threshold`. It always takes the 2nd-last bar (iloc[-2]) as the completed bar.
+    """
+    # 필요한 바 개수: ATR용 + BB용 + 여유
+    needed = atr_periods + bb_periods + 2
+
+    # 1) 4시간봉 klines 가져오기
+    klines = client.futures_klines(
+        symbol=symbol,
+        interval='4h',
+        limit=needed
+    )
+    df4 = pd.DataFrame(klines, columns=[
+        "open_time","open","high","low","close","volume",
+        "close_time","quote_av","trade_count",
+        "tb_base_av","tb_quote_av","ignore"
+    ])
+    # 2) 타입 변환
+    df4[["open","high","low","close","volume"]] = \
+        df4[["open","high","low","close","volume"]].astype(float)
+
+    # 3) True Range & ATR
+    tr1 = df4["high"] - df4["low"]
+    tr2 = (df4["high"] - df4["close"].shift()).abs()
+    tr3 = (df4["low"]  - df4["close"].shift()).abs()
+    df4["tr"]  = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    df4["atr"] = df4["tr"].rolling(window=atr_periods).mean()
+
+    # 4) ATR% or ATR 값 결정
+    df4["value"] = (df4["atr"] / df4["close"] * 100) if use_atr_percent else df4["atr"]
+
+    # 5) Bollinger Bands on 'value'
+    df4["bb_mid"]   = df4["value"].rolling(window=bb_periods).mean()
+    df4["bb_std"]   = df4["value"].rolling(window=bb_periods).std()
+    df4["bb_upper"] = df4["bb_mid"] + bb_stddev * df4["bb_std"]
+    df4["bb_lower"] = df4["bb_mid"] - bb_stddev * df4["bb_std"]
+    df4["bb_width"] = df4["bb_upper"] - df4["bb_lower"]
+
+    # 6) 데이터 충분 여부 확인
+    if len(df4) < needed:
+        return False
+
+    # 7) 바로 이전(완결된) 바의 BB Width 가져오기
+    bbw = df4.iloc[-2]["bb_width"]
+
+    return bbw < threshold
+
+
+def candle_condition(
+    symbol: str,
+    interval: str,
+    side: str
+) -> bool:
+    """
+    Returns True if the most recently completed bar (previous bar) at the given
+    symbol and interval matches the side:
+      - side == "long": previous bar is bullish (close > open)
+      - side == "short": previous bar is bearish (close < open)
+    """
+    # 2개 바를 가져와서, 마지막이 미완결 바, 그 앞이 완결 바가 됩니다.
+    klines = client.futures_klines(
+        symbol=symbol,
+        interval=interval,
+        limit=2
+    )
+    df = pd.DataFrame(klines, columns=[
+        "open_time","open","high","low","close","volume",
+        "close_time","quote_av","trade_count",
+        "tb_base_av","tb_quote_av","ignore"
+    ])
+    # open/close를 float로 변환
+    df[["open","close"]] = df[["open","close"]].astype(float)
+
+    # 완결된 바로 이전 바
+    prev = df.iloc[-2]
+    o, c = prev["open"], prev["close"]
+
+    side = side.lower()
+    if side == "long":
+        return c > o
+    elif side == "short":
+        return c < o
+    else:
+        raise ValueError("side must be 'long' or 'short'")
+
+
+
+def ema_slope_exit(
+    symbol: str,
+    interval: str,
+    lookback: int,
+    side: str
+) -> bool:
+    """
+    5분 단위로 호출해도 항상 '완전히 종료된' 막대만 검사하도록 고친 EMA slope exit.
+    """
     if side not in ("long", "short"):
         raise ValueError("side must be 'long' or 'short'")
 
-    # Determine required period for EMA and slope calculation
-    period = max(26, lookback + 1)
-
-    # 1) Fetch klines
+    # lookback+2봉 이상 가져와야 마지막 1개는 미완료 봉으로 남고,
+    # 그 앞의 lookback+1개를 완전 봉 검사에 쓸 수 있음
+    period = max(26, lookback + 2)
     klines = client.futures_klines(symbol=symbol, interval=interval, limit=period)
     df = pd.DataFrame(klines, columns=[
         'open_time','open','high','low','close','volume',
         'close_time','quote_asset_volume','number_of_trades',
         'taker_buy_base_asset_volume','taker_buy_quote_asset_volume','ignore'
     ])
-
-    # 2) Convert types
     df['close'] = df['close'].astype(float)
-
-    # 3) Calculate EMAs
     df['ema12'] = df['close'].ewm(span=12, adjust=False).mean()
     df['ema26'] = df['close'].ewm(span=26, adjust=False).mean()
-    
 
-    # 4) Check slope condition
-    sign = -1 if side == "long" else 1
-    # Ensure there are enough bars
-    if len(df) < lookback + 1:
+    # 마지막 완전 종료된 봉 인덱스
+    end = len(df) - 2
+    if end - lookback < 0:
         return False
+
+    sign = -1 if side == "long" else 1
+    # lookback 개수만큼 slope 체크 (완전 봉들만)
     for j in range(lookback):
-        curr12 = df['ema12'].iloc[-1 - j]
-        prev12 = df['ema12'].iloc[-2 - j]
-        curr26 = df['ema26'].iloc[-1 - j]
-        prev26 = df['ema26'].iloc[-2 - j]
-        # sign * slope > 0 for all lookback bars
+        curr12 = df['ema12'].iloc[end - j]
+        prev12 = df['ema12'].iloc[end - j - 1]
+        curr26 = df['ema26'].iloc[end - j]
+        prev26 = df['ema26'].iloc[end - j - 1]
         if sign * (curr12 - prev12) <= 0 or sign * (curr26 - prev26) <= 0:
             return False
 
     return True
+
 
 def get_ema_value(symbol: str, interval: str, period: int) -> float:
     """
@@ -130,7 +222,7 @@ def get_ema_value(symbol: str, interval: str, period: int) -> float:
         latest_ema: 가장 최근 EMA 값 (float).
     """
     # Use `period` as the kline limit
-    klines = client.futures_klines(symbol=symbol, interval=interval, limit=period)
+    klines = client.futures_klines(symbol=symbol, interval=interval, limit=500)
     df = pd.DataFrame(klines, columns=[
         'open_time','open','high','low','close','volume',
         'close_time','quote_asset_volume','number_of_trades',
@@ -145,6 +237,71 @@ def get_ema_value(symbol: str, interval: str, period: int) -> float:
 
     # Return the most recent EMA value
     return float(ema_series.iloc[-1])
+
+def macro_ema(
+    symbol: str,
+    interval: str,
+    period: int,
+    side: str = "long"
+) -> bool:
+    """
+    Check whether the close price of the previous fully-closed quarter-hour bar
+    (00, 15, 30, 45 minutes) is above (long) or below (short) its EMA.
+
+    Returns True if:
+      - side == "long"  and bar_close > bar_ema
+      - side == "short" and bar_close < bar_ema
+    Otherwise returns False.
+    """
+    # fetch enough bars to compute EMA and get the previous completed bar
+    klines = client.futures_klines(
+        symbol=symbol,
+        interval=interval,
+        limit=period * 5
+    )
+    df = pd.DataFrame(klines, columns=[
+        'open_time','open','high','low','close','volume',
+        'close_time','quote_asset_volume','number_of_trades',
+        'taker_buy_base_asset_volume','taker_buy_quote_asset_volume','ignore'
+    ])
+    # convert types
+    df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
+    df['close'] = df['close'].astype(float)
+
+    # compute EMA series
+    ema_series = (
+        df['close']
+        .ewm(span=period, adjust=False)
+        .mean()
+        .round(4)
+    )
+    
+
+    # only proceed if it's one of the quarter-hour bars
+
+
+    prev_bar    = df.iloc[-2]
+    prev_minute = prev_bar['open_time'].minute
+    bar_close   = prev_bar['close']
+    bar_ema     = ema_series.iloc[-2]
+    print(prev_bar)
+    print(prev_minute)
+    print(bar_close)
+    print(bar_ema)
+
+    if prev_minute not in (0, 15, 30, 45):
+        return False
+
+    # compare according to side
+    side = side.lower()
+    if side == "long":
+        return bar_close > bar_ema
+    elif side == "short":
+        return bar_close < bar_ema
+    else:
+        raise ValueError("side must be 'long' or 'short'")
+
+
 
 def message(text: str):
     """

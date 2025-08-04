@@ -13,5 +13,6 @@ from functions import *
 from discord_functions import *
 
 
+
 init_db()
 bot.run(TOKEN)  

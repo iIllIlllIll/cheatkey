@@ -64,6 +64,10 @@ variable_list = [
     "SLOPE_EXIT_LOOKBACK",
     "SLOPE_EXIT_COOLDOWN_BARS",
     "SLOPE_EXIT_PNL_THRESHOLD"
+    "Unit_override",
+    "USE_OVERRIDE_ATR",
+    "atr_override_period",
+    "atr_pct_threshold"
 
 ]
 
@@ -122,7 +126,14 @@ SLOPE_EXIT_LOOKBACK = 1
 SLOPE_EXIT_COOLDOWN_BARS = 20
 SLOPE_EXIT_PNL_THRESHOLD = 5
 
+USE_4H_CANDLE_CONDITION = True
+USE_FIRST_ADD_MACRO_EMA = False
+FIRST_ADD_CANDLE_CONDITION_ENABLED = False
 
+Unit_override = 0.8
+USE_OVERRIDE_ATR = True
+atr_override_period = 16
+atr_pct_threshold = 0.6
 
 
 # 전략 실행 상태
@@ -873,7 +884,13 @@ async def setting_show(ctx):
         ("SLOPE_EXIT",              SLOPE_EXIT),
         ("SLOPE_EXIT_PNL_THRESHOLD",SLOPE_EXIT_PNL_THRESHOLD),
         ("SLOPE_EXIT_COOLDOWN_BARS",SLOPE_EXIT_COOLDOWN_BARS),
-        ("SLOPE_EXIT_LOOKBACK",     SLOPE_EXIT_LOOKBACK)
+        ("SLOPE_EXIT_LOOKBACK",     SLOPE_EXIT_LOOKBACK),
+        ("atr_pct_threshold",       atr_pct_threshold),
+        ("atr_override_period",     atr_override_period),
+        ("Unit_override",           Unit_override),
+        ("USE_OVERRIDE_ATR",        USE_OVERRIDE_ATR)
+        
+        
     ]
 
     # (2) 9개씩 페이지 분할
@@ -1066,6 +1083,12 @@ async def setting_vars(ctx):
         f"`SLOPE_EXIT_PNL_THRESHOLD` ({SLOPE_EXIT_PNL_THRESHOLD}): SLOPE EXIT 모드 매도 pnl 임계값",
         f"`SLOPE_EXIT_COOLDOWN_BARS` ({SLOPE_EXIT_COOLDOWN_BARS}): 매수 후 SLOPE EXIT 모드 적용 안할 봉 개수 (5 : 25분)"
         f"`SLOPE_EXIT_LOOKBACK` ({SLOPE_EXIT_LOOKBACK}): SLOPE EXIT 모드에서 기울기 변화 검사할 봉 개수 (2 : 이전 봉 2개 검사)"
+
+        "\n**### ATR% Override 모드 설정**"
+        f"`USE_OVERRIDE_ATR` ({USE_OVERRIDE_ATR}): ATR% Override 모드 설정 `True`면 적용"
+        f"`Unit_override` ({Unit_override}): ATR% 임계값 이하 도달 시 tp sl 조절할 비율"
+        f"`atr_override_period` ({atr_override_period}): ATR Period 값"
+        f"`atr_pct_threshold` ({atr_pct_threshold}): ATR% 임계값"
     ]
 
     # Discord 메시지 최대 길이 고려하여 1900자 단위로 분할 전송
@@ -1327,8 +1350,8 @@ async def credit(ctx):
     await ctx.send('''
 
     CHEATKEY
-    ver 2.0
-    latest update 2025-05-30
+    ver 10.0
+    latest update 2025-08-03
 
 ''')
 
@@ -1562,6 +1585,9 @@ async def start_trading_strategy():
     global DIVIDE_VALUE,ADD_BUY_CANDLE_CONDITION,PARTIAL_EXIT_MODE,EXIT_MODE,EXIT_FULL_CONDITION,USE_TIMEOUT_CROSS,TIMEOUT_CROSS_BARS,TIMEOUT_SELL_PNL
     global FIRST_OPPOSITE_EXIT, FIRST_OPPOSITE_EXIT, MACRO_EMA_FILTER, MACRO_EMA_PERIOD, EXITMODE_TIMEFILTER
     global SLOPE_EXIT, SLOPE_EXIT_COOLDOWN_BARS, SLOPE_EXIT_LOOKBACK, SLOPE_EXIT_PNL_THRESHOLD
+    global USE_4H_CANDLE_CONDITION, USE_FIRST_ADD_MACRO_EMA, FIRST_ADD_CANDLE_CONDITION_ENABLED
+    global Unit_override, USE_OVERRIDE_ATR, atr_override_period, atr_pct_threshold
+
     current_price = None
     blnc = 0
     long_inv_amount = 0
@@ -1600,6 +1626,18 @@ async def start_trading_strategy():
 
     long_sell_timeout = 10
     short_sell_timeout = 10
+
+    long_last_checked_minute = None
+    short_last_checked_minute = None
+
+    LONG_TP_PNL_o = LONG_TP_PNL
+    LONG_SL_PNL_o = LONG_SL_PNL
+    LONG_ADD_BUY_PNL_o = LONG_ADD_BUY_PNL
+    LONG_ADD_SL_PNL_o = LONG_ADD_SL_PNL
+    SHORT_TP_PNL_o = SHORT_TP_PNL
+    SHORT_SL_PNL_o = SHORT_SL_PNL
+    SHORT_ADD_BUY_PNL_o = SHORT_ADD_BUY_PNL
+    SHORT_ADD_SL_PNL_o = SHORT_ADD_SL_PNL
 
 
     print("Trading strategy started")
@@ -1725,6 +1763,37 @@ async def start_trading_strategy():
             blnc = f.get_futures_asset_balance(asset='USDT')
 
 
+            if (now.minute == 0 and now.hour % 4 == 1) and USE_4H_CANDLE_CONDITION:
+                if bb_4h_condition(symbol=symbol):
+                    USE_FIRST_ADD_MACRO_EMA = True
+                    FIRST_ADD_CANDLE_CONDITION_ENABLED = True
+                else:
+                    USE_FIRST_ADD_MACRO_EMA = False
+                    FIRST_ADD_CANDLE_CONDITION_ENABLED = False
+
+            if ((now.minute)%30) == 0 and USE_OVERRIDE_ATR:
+                if f.override_atr(symbol,atr_override_period,atr_pct_threshold):
+                    LONG_TP_PNL_o = LONG_TP_PNL*Unit_override
+                    LONG_SL_PNL_o = LONG_SL_PNL*Unit_override
+                    LONG_ADD_BUY_PNL_o = LONG_ADD_BUY_PNL*Unit_override
+                    LONG_ADD_SL_PNL_o = [x*Unit_override for x in LONG_ADD_SL_PNL]
+                    SHORT_TP_PNL_o = SHORT_TP_PNL*Unit_override
+                    SHORT_SL_PNL_o = SHORT_SL_PNL*Unit_override
+                    SHORT_ADD_BUY_PNL_o = SHORT_ADD_BUY_PNL*Unit_override
+                    SHORT_ADD_SL_PNL_o = [x*Unit_override for x in SHORT_ADD_SL_PNL]
+                else:
+                    LONG_TP_PNL_o = LONG_TP_PNL
+                    LONG_SL_PNL_o = LONG_SL_PNL
+                    LONG_ADD_BUY_PNL_o = LONG_ADD_BUY_PNL
+                    LONG_ADD_SL_PNL_o = LONG_ADD_SL_PNL
+                    SHORT_TP_PNL_o = SHORT_TP_PNL
+                    SHORT_SL_PNL_o = SHORT_SL_PNL
+                    SHORT_ADD_BUY_PNL_o = SHORT_ADD_BUY_PNL
+                    SHORT_ADD_SL_PNL_o = SHORT_ADD_SL_PNL
+                    
+
+
+
             ### 매수 로직 
 
             if order is None:
@@ -1738,17 +1807,46 @@ async def start_trading_strategy():
                 long_count = len(long_pos_list) if long_pos_list else 0
                 short_count = len(short_pos_list) if short_pos_list else 0
 
+                # 1) now 갱신
+                now = datetime.datetime.now()
+
+                # 2) 분이 5의 배수일 때만 실행
+                if now.minute % 5 == 0:
+                    # 초가 5의 배수가 될 때까지 대기
+                    while now.second % 5 != 0:
+                        time.sleep(1)
+                        now = datetime.datetime.now()
 
 
-                if long_holding is False:
-                    if ((now.minute) % 15 == 4 or (now.minute)%15 == 5) \
-                        and f.cheatkey(symbol, interval='5m', threshold=CHEATKEY_THRESHOLD, lookback_n=CHEATKEY_LOOKBACK, use_time_filter=CHEATKEY_TIMEFILTER, side='long') \
-                        and (MACRO_EMA_FILTER is False or (MACRO_EMA_FILTER and current_price > get_ema_value(symbol,'5m',MACRO_EMA_PERIOD))):
+
+                if long_holding is False and ((now.minute)%5 == 0 and now.minute != long_last_checked_minute):
+                    long_last_checked_minute = now.minute
+                    if f.cheatkey(symbol, interval='5m', threshold=CHEATKEY_THRESHOLD, lookback_n=CHEATKEY_LOOKBACK, use_time_filter=CHEATKEY_TIMEFILTER, side='long') \
+                        and (MACRO_EMA_FILTER is False or (MACRO_EMA_FILTER and macro_ema(symbol,'5m',MACRO_EMA_PERIOD,'long'))):
                         # 롱 초기매수
 
                         long_qty = unit_usdt
-                        order = f.execute_market_order_usdt(symbol,long_qty*0.99,long_leverage,'BUY')
-                        msg_long = f'''
+                        limit_price = f.round_price(symbol, current_price * 1.001)
+
+                        filled = await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: f.ensure_limit_order_filled(
+                                symbol=symbol,
+                                side='BUY',
+                                usdt_amount=long_qty * 0.99,
+                                price=limit_price,
+                                leverage=long_leverage,
+                                position_side='LONG',
+                                max_wait=120,
+                                retry_interval=10,
+                                cancel_after=30
+                            )
+                        )
+                        if not filled:
+                            # 2분 내 지정가 미체결 → 건너뛰고 다음 루프
+                            continue
+                        if filled:
+                            msg_long = f'''
 ## 🚀 매수주문완료 #0
 ```
 포지션 : 🟩LONG
@@ -1757,20 +1855,46 @@ async def start_trading_strategy():
 매수금액 : {long_qty}
 ```
 '''
-                        msg_long_alert = f'### 🟩LONG | 매수 #0 | 현재가격 : {current_price} | 레버리지 : {long_leverage} | 매수금액 : {long_qty}'
-                        f.message(msg_long)
-                        f.message_alert(msg_long_alert)
-                        long_buytime_list.append(now)
-                        long_pos_list.append(long_qty)
-                        long_Timeout_set = True
+                            msg_long_alert = f'`🟩LONG | 매수 #0 | 현재가격 : {current_price} | 레버리지 : {long_leverage} | 매수금액 : {long_qty}`'
+                            f.message(msg_long)
+                            f.message_alert(msg_long_alert)
+                            long_buytime_list.append(now)
+                            long_pos_list.append(long_qty)
+                            long_Timeout_set = True
 
                 elif long_holding is True and long_count == 1:
-                    if long_pnl <= LONG_ADD_BUY_PNL and (now.minute)%5 == 0:
+                    if long_pnl <= LONG_ADD_BUY_PNL_o and ((now.minute)%5 == 0 and now.minute != long_last_checked_minute):
                         # 롱 첫 추가매수
 
-                        long_qty = long_inv_amount
-                        order = f.execute_market_order_usdt(symbol,long_qty*0.99,long_leverage,'BUY')
-                        msg_long = f'''
+                        long_last_checked_minute = now.minute
+
+                        if (USE_FIRST_ADD_MACRO_EMA is False or (USE_FIRST_ADD_MACRO_EMA and macro_ema(symbol,'5m',MACRO_EMA_PERIOD,'long'))) and \
+                        (FIRST_ADD_CANDLE_CONDITION_ENABLED is False or (FIRST_ADD_CANDLE_CONDITION_ENABLED and candle_condition(symbol,'5m','long'))): 
+                        
+
+                            long_qty = long_inv_amount
+                            limit_price = f.round_price(symbol, current_price * 1.001)
+
+                            filled = await asyncio.get_event_loop().run_in_executor(
+                                None,
+                                lambda: f.ensure_limit_order_filled(
+                                    symbol=symbol,
+                                    side='BUY',
+                                    usdt_amount=long_qty * 0.99,
+                                    price=limit_price,
+                                    leverage=long_leverage,
+                                    position_side='LONG',
+                                    max_wait=120,
+                                    retry_interval=10,
+                                    cancel_after=30
+                                )
+                            )
+
+                            if not filled:
+                                # 2분 내 지정가 미체결 → 건너뛰고 다음 루프
+                                continue
+                            if filled:
+                                msg_long = f'''
 ## 🚀 매수주문완료 #{long_count}
 ```
 포지션 : 🟩LONG
@@ -1779,19 +1903,39 @@ async def start_trading_strategy():
 매수금액 : {long_qty}
 ```
 '''
-                        msg_long_alert = f'### 🟩LONG | 매수 #{long_count} | 현재가격 : {current_price} | 레버리지 : {long_leverage} | 매수금액 : {long_qty}'
-                        f.message(msg_long)
-                        f.message_alert(msg_long_alert)
-                        long_buytime_list.append(now)
-                        long_pos_list.append(long_qty)
+                                msg_long_alert = f'`🟩LONG | 매수 #{long_count} | 현재가격 : {current_price} | 레버리지 : {long_leverage} | 매수금액 : {long_qty}`'
+                                f.message(msg_long)
+                                f.message_alert(msg_long_alert)
+                                long_buytime_list.append(now)
+                                long_pos_list.append(long_qty)
 
-                elif long_holding is True and long_count > 1 and long_count < 3:
+                elif long_holding is True and long_count > 1 and long_count < 3 :
                     if  (now.minute)%5 == 0 and f.emacross(symbol,side='long',use_candle_condition=ADD_BUY_CANDLE_CONDITION):
                         # 롱 추가매수
 
                         long_qty = long_inv_amount
-                        order = f.execute_market_order_usdt(symbol,long_qty*0.99,long_leverage,'BUY')
-                        msg_long = f'''
+                        limit_price = f.round_price(symbol, current_price * 1.001)
+
+                        filled = await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: f.ensure_limit_order_filled(
+                                symbol=symbol,
+                                side='BUY',
+                                usdt_amount=long_qty * 0.99,
+                                price=limit_price,
+                                leverage=long_leverage,
+                                position_side='LONG',
+                                max_wait=120,
+                                retry_interval=10,
+                                cancel_after=30
+                            )
+                        )
+
+                        if not filled:
+                            # 2분 내 지정가 미체결 → 건너뛰고 다음 루프
+                            continue
+                        if filled:
+                            msg_long = f'''
 ## 🚀 매수주문완료 #{long_count}
 ```
 포지션 : 🟩LONG
@@ -1800,22 +1944,42 @@ async def start_trading_strategy():
 매수금액 : {long_qty}
 ```
 '''
-                        msg_long_alert = f'### 🟩LONG | 매수 #{long_count} | 현재가격 : {current_price} | 레버리지 : {long_leverage} | 매수금액 : {long_qty}'
-                        f.message(msg_long)
-                        f.message_alert(msg_long_alert)
-                        long_buytime_list.append(now)
-                        long_pos_list.append(long_qty)
+                            msg_long_alert = f'`🟩LONG | 매수 #{long_count} | 현재가격 : {current_price} | 레버리지 : {long_leverage} | 매수금액 : {long_qty}`'
+                            f.message(msg_long)
+                            f.message_alert(msg_long_alert)
+                            long_buytime_list.append(now)
+                            long_pos_list.append(long_qty)
 
 
-                if short_holding is False:
-                    if ((now.minute) % 15 == 4 or (now.minute)%15 == 5)\
-                        and f.cheatkey(symbol, interval='5m', threshold=CHEATKEY_THRESHOLD, lookback_n=CHEATKEY_LOOKBACK, use_time_filter=CHEATKEY_TIMEFILTER, side='short')\
-                        and (MACRO_EMA_FILTER is False or (MACRO_EMA_FILTER and current_price < get_ema_value(symbol,'5m',MACRO_EMA_PERIOD))):
+                if short_holding is False and ((now.minute)%5 == 0 and now.minute != short_last_checked_minute):
+                    short_last_checked_minute = now.minute
+                    if f.cheatkey(symbol, interval='5m', threshold=CHEATKEY_THRESHOLD, lookback_n=CHEATKEY_LOOKBACK, use_time_filter=CHEATKEY_TIMEFILTER, side='short')\
+                        and (MACRO_EMA_FILTER is False or (MACRO_EMA_FILTER and macro_ema(symbol,'5m',MACRO_EMA_PERIOD,'short'))):
                         # 숏 초기매수
 
                         short_qty = unit_usdt
-                        order = f.execute_market_order_usdt(symbol,short_qty*0.99,short_leverage,'SELL')
-                        msg_short = f'''
+                        limit_price = f.round_price(symbol, current_price * 0.999)
+
+                        filled = await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: f.ensure_limit_order_filled(
+                                symbol=symbol,
+                                side='SELL',
+                                usdt_amount=short_qty * 0.99,
+                                price=limit_price,
+                                leverage=short_leverage,
+                                position_side='SHORT',
+                                max_wait=120,
+                                retry_interval=10,
+                                cancel_after=30
+                            )
+                        )
+
+                        if not filled:
+                            # 2분 내 지정가 미체결 → 건너뛰고 다음 루프
+                            continue
+                        if filled:                       
+                            msg_short = f'''
 ## 🚀 매수주문완료 #0
 ```
 포지션 : 🟥SHORT
@@ -1824,20 +1988,43 @@ async def start_trading_strategy():
 매수금액 : {short_qty}
 ```
 '''
-                        msg_short_alert = f'### 🟥SHORT | 매수 #0 | 현재가격 : {current_price} | 레버리지 : {short_leverage} | 매수금액 : {short_qty}'
-                        f.message(msg_short)
-                        f.message_alert(msg_short_alert)
-                        short_buytime_list.append(now)
-                        short_pos_list.append(short_qty)
-                        short_Timeout_set = True
+                            msg_short_alert = f'`🟥SHORT | 매수 #0 | 현재가격 : {current_price} | 레버리지 : {short_leverage} | 매수금액 : {short_qty}`'
+                            f.message(msg_short)
+                            f.message_alert(msg_short_alert)
+                            short_buytime_list.append(now)
+                            short_pos_list.append(short_qty)
+                            short_Timeout_set = True
 
                 elif short_holding is True and short_count == 1:
-                    if short_pnl <= SHORT_ADD_BUY_PNL and (now.minute)%5 == 0:
+                    if short_pnl <= SHORT_ADD_BUY_PNL_o and ((now.minute)%5 == 0 and now.minute != short_last_checked_minute):
                         # 숏 첫 추가매수
 
-                        short_qty = short_inv_amount
-                        order = f.execute_market_order_usdt(symbol,short_qty*0.99,short_leverage,'SELL')
-                        msg_short = f'''
+                        short_last_checked_minute = now.minute
+                        if (USE_FIRST_ADD_MACRO_EMA is False or (USE_FIRST_ADD_MACRO_EMA and macro_ema(symbol,'5m',MACRO_EMA_PERIOD,'short'))) and \
+                        (FIRST_ADD_CANDLE_CONDITION_ENABLED is False or (FIRST_ADD_CANDLE_CONDITION_ENABLED and candle_condition(symbol,'5m','short'))): 
+                            short_qty = short_inv_amount
+                            limit_price = f.round_price(symbol, current_price * 0.999)
+
+                            filled = await asyncio.get_event_loop().run_in_executor(
+                                None,
+                                lambda: f.ensure_limit_order_filled(
+                                    symbol=symbol,
+                                    side='SELL',
+                                    usdt_amount=short_qty * 0.99,
+                                    price=limit_price,
+                                    leverage=short_leverage,
+                                    position_side='SHORT',
+                                    max_wait=120,
+                                    retry_interval=10,
+                                    cancel_after=30
+                                )
+                            )
+
+                            if not filled:
+                                # 2분 내 지정가 미체결 → 건너뛰고 다음 루프
+                                continue
+                            if filled:          
+                                msg_short = f'''
 ## 🚀 매수주문완료 #{short_count}
 ```
 포지션 : 🟥SHORT
@@ -1846,19 +2033,39 @@ async def start_trading_strategy():
 매수금액 : {short_qty}
 ```
 '''
-                        msg_short_alert = f'### 🟥SHORT | 매수 #{short_count} | 현재가격 : {current_price} | 레버리지 : {short_leverage} | 매수금액 : {short_qty}'
-                        f.message(msg_short)
-                        f.message_alert(msg_short_alert)
-                        short_buytime_list.append(now)
-                        short_pos_list.append(short_qty)
+                                msg_short_alert = f'`🟥SHORT | 매수 #{short_count} | 현재가격 : {current_price} | 레버리지 : {short_leverage} | 매수금액 : {short_qty}`'
+                                f.message(msg_short)
+                                f.message_alert(msg_short_alert)
+                                short_buytime_list.append(now)
+                                short_pos_list.append(short_qty)
 
                 elif short_holding is True and short_count > 1 and short_count < 3:
                     if (now.minute)%5 == 0 and f.emacross(symbol,side='short',use_candle_condition=ADD_BUY_CANDLE_CONDITION):
                         # 숏 추가매수
 
                         short_qty = short_inv_amount
-                        order = f.execute_market_order_usdt(symbol,short_qty*0.99,short_leverage,'SELL')
-                        msg_short = f'''
+                        limit_price = f.round_price(symbol, current_price * 0.999)
+
+                        filled = await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: f.ensure_limit_order_filled(
+                                symbol=symbol,
+                                side='SELL',
+                                usdt_amount=short_qty * 0.99,
+                                price=limit_price,
+                                leverage=short_leverage,
+                                position_side='SHORT',
+                                max_wait=120,
+                                retry_interval=10,
+                                cancel_after=30
+                            )
+                        )
+
+                        if not filled:
+                            # 2분 내 지정가 미체결 → 건너뛰고 다음 루프
+                            continue
+                        if filled:          
+                            msg_short = f'''
 ## 🚀 매수주문완료 #{short_count}
 ```
 포지션 : 🟥SHORT
@@ -1867,11 +2074,11 @@ async def start_trading_strategy():
 매수금액 : {short_qty}
 ```
 '''
-                        msg_short_alert = f'### 🟥SHORT | 매수 #{short_count} | 현재가격 : {current_price} | 레버리지 : {short_leverage} | 매수금액 : {short_qty}'
-                        f.message(msg_short)
-                        f.message_alert(msg_short_alert)
-                        short_buytime_list.append(now)
-                        short_pos_list.append(short_qty)
+                            msg_short_alert = f'`🟥SHORT | 매수 #{short_count} | 현재가격 : {current_price} | 레버리지 : {short_leverage} | 매수금액 : {short_qty}`'
+                            f.message(msg_short)
+                            f.message_alert(msg_short_alert)
+                            short_buytime_list.append(now)
+                            short_pos_list.append(short_qty)
 
 
 
@@ -1887,47 +2094,133 @@ async def start_trading_strategy():
 
 
                     # TP Exit
-                    if long_pnl >= LONG_TP_PNL:
-                        order = f.close(symbol,side='long')
-                        long_selltime_list.append(now)
-                        long_savemode = True
-
-                    # SL Exit
-                    elif long_count == 1 and long_pnl <= LONG_SL_PNL:
-                        order = f.close(symbol,side='long')
-                        long_selltime_list.append(now)
-                        long_savemode = True
-                    
-                    elif long_count > 1 and long_pnl <= LONG_ADD_SL_PNL[long_count-2]:
-                        order = f.close(symbol,side='long')
-                        long_selltime_list.append(now)
-                        long_savemode = True
-
-                    # Slope Exit
-                    elif SLOPE_EXIT and ((now.minute) % 15 == 4 or (now.minute)%15 == 5) and ( long_minutes_int > 5*SLOPE_EXIT_COOLDOWN_BARS) and ema_slope_exit(symbol,'5m',SLOPE_EXIT_LOOKBACK,'long'):
-                        if  long_pnl >= SLOPE_EXIT_PNL_THRESHOLD:
-                            order = f.close(symbol,side='long')
+                    if long_pnl >= LONG_TP_PNL_o:
+                        success = await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: f.close_limit(
+                                symbol=symbol,
+                                side='long',           # 롱 포지션 청산 → SELL
+                                leverage=long_leverage,
+                                max_wait=120,          # 타임아웃(초)
+                                retry_interval=10,     # 폴링 간격(초)
+                                cancel_after=30        # 재주문 주기(초)
+                            )
+                        )
+                        if success:
                             long_selltime_list.append(now)
                             long_savemode = True
+                        else:
+                            # 실패 시 다음 루프
+                            continue
+
+
+                    # SL Exit
+                    elif long_count == 1 and long_pnl <= LONG_SL_PNL_o:
+                        success = await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: f.close_limit(
+                                symbol=symbol,
+                                side='long',           # 롱 포지션 청산 → SELL
+                                leverage=long_leverage,
+                                max_wait=120,          # 타임아웃(초)
+                                retry_interval=10,     # 폴링 간격(초)
+                                cancel_after=30        # 재주문 주기(초)
+                            )
+                        )
+                        if success:
+                            long_selltime_list.append(now)
+                            long_savemode = True
+                        else:
+                            # 실패 시 다음 루프
+                            continue
+                    
+                    elif long_count > 1 and long_pnl <= LONG_ADD_SL_PNL_o[long_count-2]:
+                        success = await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: f.close_limit(
+                                symbol=symbol,
+                                side='long',           # 롱 포지션 청산 → SELL
+                                leverage=long_leverage,
+                                max_wait=120,          # 타임아웃(초)
+                                retry_interval=10,     # 폴링 간격(초)
+                                cancel_after=30        # 재주문 주기(초)
+                            )
+                        )
+                        if success:
+                            long_selltime_list.append(now)
+                            long_savemode = True
+                        else:
+                            # 실패 시 다음 루프
+                            continue
+
+                    # Slope Exit
+                    elif SLOPE_EXIT and (now.minute)%5 == 0 and ( long_minutes_int > 5*SLOPE_EXIT_COOLDOWN_BARS) and ema_slope_exit(symbol,'5m',SLOPE_EXIT_LOOKBACK,'long'):
+                        if  long_pnl >= SLOPE_EXIT_PNL_THRESHOLD:
+                            success = await asyncio.get_event_loop().run_in_executor(
+                                None,
+                                lambda: f.close_limit(
+                                    symbol=symbol,
+                                    side='long',           # 롱 포지션 청산 → SELL
+                                    leverage=long_leverage,
+                                    max_wait=120,          # 타임아웃(초)
+                                    retry_interval=10,     # 폴링 간격(초)
+                                    cancel_after=30        # 재주문 주기(초)
+                                )
+                            )
+                            if success:
+                                long_selltime_list.append(now)
+                                long_savemode = True
+                            else:
+                                # 실패 시 다음 루프
+                                continue
 
                     # Partial Exit Add/All
                     elif long_count > 1 and long_pnl >= LONG_PARTIAL_EXIT_PNL:
                         if PARTIAL_EXIT_MODE == 'added':
                             long_qty = sum(long_pos_list[1:])
                             long_tot = sum(long_pos_list)
-                            long_pct = long_qty/long_tot*100
-                            order = f.close_pct(symbol,pct=long_pct,side='long')
-                            long_selltime_list.append(now)
-                            msg_long_alert = f'### 🟩LONG | 매도 # PARTIAL EXIT | 현재가격 : {current_price} | 레버리지 : {long_leverage} | 매도퍼센트 : {long_pct}%'
-                            f.message_alert(msg_long_alert)
-                            del long_pos_list[1:]
+                            success = await asyncio.get_event_loop().run_in_executor(
+                                None,
+                                lambda: f.close_limit_usdt(
+                                    symbol=symbol,
+                                    side='long',           # 숏 → BUY
+                                    usdt_amount=long_qty,
+                                    leverage=long_leverage, 
+                                    max_wait=120,
+                                    retry_interval=10,
+                                    cancel_after=30
+                                )
+                            )
+                            if success:
+                                long_selltime_list.append(now)
+                                msg_long_alert = f'`🟩LONG | 매도 # PARTIAL EXIT | 현재가격 : {current_price} | 레버리지 : {long_leverage} | 매도수량 : {long_qty}%`'
+                                f.message_alert(msg_long_alert)
+                                del long_pos_list[1:]
+                            else:
+                                continue
+
                         elif PARTIAL_EXIT_MODE == 'all':
-                            order = f.close(symbol,side='long')
-                            long_savemode = True
+                            success = await asyncio.get_event_loop().run_in_executor(
+                                None,
+                                lambda: f.close_limit(
+                                    symbol=symbol,
+                                    side='long',           # 롱 포지션 청산 → SELL
+                                    leverage=long_leverage,
+                                    max_wait=120,          # 타임아웃(초)
+                                    retry_interval=10,     # 폴링 간격(초)
+                                    cancel_after=30        # 재주문 주기(초)
+                                )
+                            )
+                            if success:
+                                long_selltime_list.append(now)
+                                long_savemode = True
+                            else:
+                                # 실패 시 다음 루프
+                                continue
 
                     # Exit Add/All
                     elif ((FIRST_OPPOSITE_EXIT is False and long_count > 1 and EXIT_MODE in ('added', 'all') \
-                        and ((now.minute) % 15 == 4 or (now.minute)%15 == 5) \
+                        and (now.minute)%5 == 0 \
                         and f.cheatkey(
                             symbol,
                             interval='5m',
@@ -1937,7 +2230,7 @@ async def start_trading_strategy():
                             side='short'
                         )) or
                     (FIRST_OPPOSITE_EXIT is True and EXIT_MODE in ('added', 'all') \
-                        and ((now.minute) % 15 == 4 or (now.minute)%15 == 5) \
+                        and (now.minute)%5 == 0 \
                         and f.cheatkey(
                             symbol,
                             interval='5m',
@@ -1951,32 +2244,88 @@ async def start_trading_strategy():
                             if EXIT_MODE == 'added' and long_count > 1:
                                 long_qty = sum(long_pos_list[1:])
                                 long_tot = sum(long_pos_list)
-                                long_pct = long_qty/long_tot*100
-                                order = f.close_pct(symbol,pct=long_pct,side='long')
-                                long_selltime_list.append(now)
-                                msg_long_alert = f'### 🟩LONG | 매도 # OPPOSITE EXIT | 현재가격 : {current_price} | 레버리지 : {long_leverage} | 매도퍼센트 : {long_pct}%'
-                                f.message_alert(msg_long_alert)
-                                long_selltime_list.append(now)
-                                del long_pos_list[1:]
+                                success = await asyncio.get_event_loop().run_in_executor(
+                                    None,
+                                    lambda: f.close_limit_usdt(
+                                        symbol=symbol,
+                                        side='long',           # 숏 → BUY
+                                        usdt_amount=long_qty,
+                                        leverage=long_leverage, 
+                                        max_wait=120,
+                                        retry_interval=10,
+                                        cancel_after=30
+                                    )
+                                )
+                                if success:
+                                    long_selltime_list.append(now)
+                                    msg_long_alert = f'`🟩LONG | 매도 # OPPOSITE EXIT | 현재가격 : {current_price} | 레버리지 : {long_leverage} | 매도수량 : {long_qty}`'
+                                    f.message_alert(msg_long_alert)
+                                    del long_pos_list[1:]
+                                else:
+                                    continue
+                                
                             elif EXIT_MODE == 'all' or (long_pnl > FIRST_OPPOSITE_EXIT and FIRST_OPPOSITE_EXIT is True and long_count == 1):
-                                order = f.close(symbol,side='long')
-                                long_savemode = True
+                                success = await asyncio.get_event_loop().run_in_executor(
+                                    None,
+                                    lambda: f.close_limit(
+                                        symbol=symbol,
+                                        side='long',           # 롱 포지션 청산 → SELL
+                                        leverage=long_leverage,
+                                        max_wait=120,          # 타임아웃(초)
+                                        retry_interval=10,     # 폴링 간격(초)
+                                        cancel_after=30        # 재주문 주기(초)
+                                    )
+                                )
+                                if success:
+                                    long_selltime_list.append(now)
+                                    long_savemode = True
+                                else:
+                                    # 실패 시 다음 루프
+                                    continue
 
                         elif EXIT_FULL_CONDITION == 'profit_only':
                             if long_pnl > 0:
                                 if EXIT_MODE == 'added' and long_count > 1:
                                     long_qty = sum(long_pos_list[1:])
                                     long_tot = sum(long_pos_list)
-                                    long_pct = long_qty/long_tot*100
-                                    order = f.close_pct(symbol,pct=long_pct,side='long')
-                                    long_selltime_list.append(now)
-                                    msg_long_alert = f'### 🟩LONG | 매도 # OPPOSITE EXIT | 현재가격 : {current_price} | 레버리지 : {long_leverage} | 매도퍼센트 : {long_pct}%'
-                                    f.message_alert(msg_long_alert)
-                                    long_selltime_list.append(now)
-                                    del long_pos_list[1:]
+                                    success = await asyncio.get_event_loop().run_in_executor(
+                                        None,
+                                        lambda: f.close_limit_usdt(
+                                            symbol=symbol,
+                                            side='long',           # 숏 → BUY
+                                            usdt_amount=long_qty,
+                                            leverage=long_leverage, 
+                                            max_wait=120,
+                                            retry_interval=10,
+                                            cancel_after=30
+                                        )
+                                    )
+                                    if success:
+                                        long_selltime_list.append(now)
+                                        msg_long_alert = f'`🟩LONG | 매도 # OPPOSITE EXIT | 현재가격 : {current_price} | 레버리지 : {long_leverage} | 매도수량 : {long_qty}`'
+                                        f.message_alert(msg_long_alert)
+                                        del long_pos_list[1:]
+                                    else:
+                                        continue
+                                
                                 elif EXIT_MODE == 'all' or (long_pnl > FIRST_OPPOSITE_EXIT and FIRST_OPPOSITE_EXIT is True and long_count == 1):
-                                    order = f.close(symbol,side='long')
-                                    long_savemode = True
+                                    success = await asyncio.get_event_loop().run_in_executor(
+                                        None,
+                                        lambda: f.close_limit(
+                                            symbol=symbol,
+                                            side='long',           # 롱 포지션 청산 → SELL
+                                            leverage=long_leverage,
+                                            max_wait=120,          # 타임아웃(초)
+                                            retry_interval=10,     # 폴링 간격(초)
+                                            cancel_after=30        # 재주문 주기(초)
+                                        )
+                                    )
+                                    if success:
+                                        long_selltime_list.append(now)
+                                        long_savemode = True
+                                    else:
+                                        # 실패 시 다음 루프
+                                        continue
 
                     # Timeout Exit
                     elif USE_TIMEOUT_CROSS and long_Timeout_set is not None:
@@ -1986,10 +2335,25 @@ async def start_trading_strategy():
                             long_Timeout_set = None
                         elif minutes >= TIMEOUT_CROSS_BARS*5:
                             if long_pnl > TIMEOUT_SELL_PNL:
-                                order = f.close(symbol,side='long')
-                                long_selltime_list.append(now)
-                                long_savemode = True
-                                long_Timeout_set = None
+                                success = await asyncio.get_event_loop().run_in_executor(
+                                    None,
+                                    lambda: f.close_limit(
+                                        symbol=symbol,
+                                        side='long',           # 롱 포지션 청산 → SELL
+                                        leverage=long_leverage,
+                                        max_wait=120,          # 타임아웃(초)
+                                        retry_interval=10,     # 폴링 간격(초)
+                                        cancel_after=30        # 재주문 주기(초)
+                                    )
+                                )
+                                if success:
+                                    long_selltime_list.append(now)
+                                    long_savemode = True
+                                    long_Timeout_set = None
+                                else:
+                                    # 실패 시 다음 루프
+                                    continue
+                                
 
 
             if order is None:
@@ -1997,48 +2361,131 @@ async def start_trading_strategy():
                     short_diff = now - short_buytime_list[0] if short_buytime_list else 0
                     short_minutes_int = float(short_diff.total_seconds() // 60) if short_buytime_list else 0
                     # TP Exit
-                    if short_pnl >= SHORT_TP_PNL:
-                        order = f.close(symbol, side='short')
-                        short_selltime_list.append(now)
-                        short_savemode = True
-
-                    # SL Exit
-                    elif short_count == 1 and short_pnl <= SHORT_SL_PNL:
-                        order = f.close(symbol, side='short')
-                        short_selltime_list.append(now)
-                        short_savemode = True
-
-                    elif short_count > 1 and short_pnl <= SHORT_ADD_SL_PNL[short_count-2]:
-                        order = f.close(symbol, side='short')
-                        short_selltime_list.append(now)
-                        short_savemode = True
-
-                    # Slope Exit
-                    elif SLOPE_EXIT and ((now.minute) % 15 == 4 or (now.minute)%15 == 5) and ( short_minutes_int > 5*SLOPE_EXIT_COOLDOWN_BARS) and ema_slope_exit(symbol,'5m',SLOPE_EXIT_LOOKBACK,'short'):
-                        if  short_pnl >= SLOPE_EXIT_PNL_THRESHOLD:
-                            order = f.close(symbol,side='short')
+                    if short_pnl >= SHORT_TP_PNL_o:
+                        success = await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: f.close_limit_usdt(
+                                symbol=symbol,
+                                side='short',          # 숏 포지션 청산 → BUY
+                                usdt_amount=short_inv_amount,
+                                leverage=short_leverage,
+                                max_wait=120,          # 타임아웃(초)
+                                retry_interval=10,     # 폴링 간격(초)
+                                cancel_after=30        # 재주문 주기(초)
+                            )
+                        )
+                        if success:
                             short_selltime_list.append(now)
                             short_savemode = True
+                        else:
+                            continue
+
+                    # SL Exit
+                    elif short_count == 1 and short_pnl <= SHORT_SL_PNL_o:
+                        success = await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: f.close_limit_usdt(
+                                symbol=symbol,
+                                side='short',          # 숏 포지션 청산 → BUY
+                                usdt_amount=short_inv_amount,
+                                leverage=short_leverage,
+                                max_wait=120,          # 타임아웃(초)
+                                retry_interval=10,     # 폴링 간격(초)
+                                cancel_after=30        # 재주문 주기(초)
+                            )
+                        )
+                        if success:
+                            short_selltime_list.append(now)
+                            short_savemode = True
+                        else:
+                            continue
+
+                    elif short_count > 1 and short_pnl <= SHORT_ADD_SL_PNL_o[short_count-2]:
+                        success = await asyncio.get_event_loop().run_in_executor(
+                            None,
+                            lambda: f.close_limit_usdt(
+                                symbol=symbol,
+                                side='short',          # 숏 포지션 청산 → BUY
+                                usdt_amount=short_inv_amount,
+                                leverage=short_leverage,
+                                max_wait=120,          # 타임아웃(초)
+                                retry_interval=10,     # 폴링 간격(초)
+                                cancel_after=30        # 재주문 주기(초)
+                            )
+                        )
+                        if success:
+                            short_selltime_list.append(now)
+                            short_savemode = True
+                        else:
+                            continue
+
+                    # Slope Exit
+                    elif SLOPE_EXIT and (now.minute)%5 == 0 and ( short_minutes_int > 5*SLOPE_EXIT_COOLDOWN_BARS) and ema_slope_exit(symbol,'5m',SLOPE_EXIT_LOOKBACK,'short'):
+                        if  short_pnl >= SLOPE_EXIT_PNL_THRESHOLD:
+                            success = await asyncio.get_event_loop().run_in_executor(
+                                None,
+                                lambda: f.close_limit_usdt(
+                                    symbol=symbol,
+                                    side='short',          # 숏 포지션 청산 → BUY
+                                    usdt_amount=short_inv_amount,
+                                    leverage=short_leverage,
+                                    max_wait=120,          # 타임아웃(초)
+                                    retry_interval=10,     # 폴링 간격(초)
+                                    cancel_after=30        # 재주문 주기(초)
+                                )
+                            )
+                            if success:
+                                short_selltime_list.append(now)
+                                short_savemode = True
+                            else:
+                                continue
 
                     # Partial Exit Add/All
                     elif short_count > 1 and short_pnl >= SHORT_PARTIAL_EXIT_PNL:
                         if PARTIAL_EXIT_MODE == 'added':
                             short_qty = sum(short_pos_list[1:])
                             short_tot = sum(short_pos_list)
-                            short_pct = short_qty/short_tot*100
-                            order = f.close_pct(symbol,pct=short_pct,side='short')
-                            short_selltime_list.append(now)
-                            msg_short_alert = f'### 🟥SHORT | 매도 # PARTIAL EXIT | 현재가격 : {current_price} | 레버리지 : {short_leverage} | 매도퍼센트 : {short_pct}%'
-                            f.message_alert(msg_short_alert)
-                            short_selltime_list.append(now)
-                            del short_pos_list[1:]
+                            success = await asyncio.get_event_loop().run_in_executor(
+                                None,
+                                lambda: f.close_limit_usdt(
+                                    symbol=symbol,
+                                    side='short',           # 숏 → BUY
+                                    usdt_amount=short_qty,
+                                    leverage=short_leverage, 
+                                    max_wait=120,
+                                    retry_interval=10,
+                                    cancel_after=30
+                                )
+                            )
+                            if success:
+                                short_selltime_list.append(now)
+                                msg_short_alert = f'`🟥SHORT | 매도 # PARTIAL EXIT | 현재가격 : {current_price} | 레버리지 : {short_leverage} | 매도수량 : {short_qty}%`'
+                                f.message_alert(msg_short_alert)
+                                del short_pos_list[1:]
+                            else:
+                                continue
                         elif PARTIAL_EXIT_MODE == 'all':
-                            order = f.close(symbol, side='short')
-                            short_savemode = True
+                            success = await asyncio.get_event_loop().run_in_executor(
+                                None,
+                                lambda: f.close_limit_usdt(
+                                    symbol=symbol,
+                                    side='short',          # 숏 포지션 청산 → BUY
+                                    usdt_amount=short_inv_amount,
+                                    leverage=short_leverage,
+                                    max_wait=120,          # 타임아웃(초)
+                                    retry_interval=10,     # 폴링 간격(초)
+                                    cancel_after=30        # 재주문 주기(초)
+                                )
+                            )
+                            if success:
+                                short_selltime_list.append(now)
+                                short_savemode = True
+                            else:
+                                continue
 
                     # Exit Add/All
                     elif ((FIRST_OPPOSITE_EXIT is False and short_count > 1 and EXIT_MODE in ('added', 'all') \
-                        and ((now.minute) % 15 == 4 or (now.minute)%15 == 5) \
+                        and (now.minute)%5 == 0 \
                         and f.cheatkey(
                             symbol,
                             interval='5m',
@@ -2048,7 +2495,7 @@ async def start_trading_strategy():
                             side='long'
                         )) or 
                     (FIRST_OPPOSITE_EXIT and EXIT_MODE in ('added', 'all') \
-                        and ((now.minute) % 15 == 4 or (now.minute)%15 == 5) \
+                        and (now.minute)%5 == 0 \
                         and f.cheatkey(
                             symbol,
                             interval='5m',
@@ -2061,32 +2508,87 @@ async def start_trading_strategy():
                             if EXIT_MODE == 'added' and short_count > 1:
                                 short_qty = sum(short_pos_list[1:])
                                 short_tot = sum(short_pos_list)
-                                short_pct = short_qty/short_tot*100
-                                order = f.close_pct(symbol,pct=short_pct,side='short')
-                                short_selltime_list.append(now)
-                                msg_short_alert = f'### 🟥SHORT | 매도 # OPPOSITE EXIT | 현재가격 : {current_price} | 레버리지 : {short_leverage} | 매도퍼센트 : {short_pct}%'
-                                f.message_alert(msg_short_alert)
-                                short_selltime_list.append(now)
-                                del short_pos_list[1:]
+                                success = await asyncio.get_event_loop().run_in_executor(
+                                    None,
+                                    lambda: f.close_limit_usdt(
+                                        symbol=symbol,
+                                        side='short',           # 숏 → BUY
+                                        usdt_amount=short_qty,
+                                        leverage=short_leverage, 
+                                        max_wait=120,
+                                        retry_interval=10,
+                                        cancel_after=30
+                                    )
+                                )
+                                if success:
+                                    short_selltime_list.append(now)
+                                    msg_short_alert = f'`🟥SHORT | 매도 # OPPOSITE EXIT | 현재가격 : {current_price} | 레버리지 : {short_leverage} | 매도수량 : {short_qty}%`'
+                                    f.message_alert(msg_short_alert)
+                                    del short_pos_list[1:]
+                                else:
+                                    continue
                             elif EXIT_MODE == 'all' or (long_pnl > FIRST_OPPOSITE_EXIT and FIRST_OPPOSITE_EXIT is True and short_count == 1):
                                 order = f.close(symbol, side='short')
-                                short_savemode = True
+                                success = await asyncio.get_event_loop().run_in_executor(
+                                    None,
+                                    lambda: f.close_limit_usdt(
+                                        symbol=symbol,
+                                        side='short',          # 숏 포지션 청산 → BUY
+                                        usdt_amount=short_inv_amount,
+                                        leverage=short_leverage,
+                                        max_wait=120,          # 타임아웃(초)
+                                        retry_interval=10,     # 폴링 간격(초)
+                                        cancel_after=30        # 재주문 주기(초)
+                                    )
+                                )
+                                if success:
+                                    short_selltime_list.append(now)
+                                    short_savemode = True
+                                else:
+                                    continue
 
                         elif EXIT_FULL_CONDITION == 'profit_only':
                             if short_pnl > 0:
                                 if EXIT_MODE == 'added' and short_count > 1:
                                     short_qty = sum(short_pos_list[1:])
                                     short_tot = sum(short_pos_list)
-                                    short_pct = short_qty/short_tot*100
-                                    order = f.close_pct(symbol,pct=short_pct,side='short')
-                                    short_selltime_list.append(now)
-                                    msg_short_alert = f'### 🟥SHORT | 매도 # OPPOSITE EXIT | 현재가격 : {current_price} | 레버리지 : {short_leverage} | 매도퍼센트 : {short_pct}%'
-                                    f.message_alert(msg_short_alert)
-                                    short_selltime_list.append(now)
-                                    del short_pos_list[1:]
+                                    success = await asyncio.get_event_loop().run_in_executor(
+                                        None,
+                                        lambda: f.close_limit_usdt(
+                                            symbol=symbol,
+                                            side='short',           # 숏 → BUY
+                                            usdt_amount=short_qty,
+                                            leverage=short_leverage, 
+                                            max_wait=120,
+                                            retry_interval=10,
+                                            cancel_after=30
+                                        )
+                                    )
+                                    if success:
+                                        short_selltime_list.append(now)
+                                        msg_short_alert = f'`🟥SHORT | 매도 # PARTIAL EXIT | 현재가격 : {current_price} | 레버리지 : {short_leverage} | 매도수량 : {short_qty}%`'
+                                        f.message_alert(msg_short_alert)
+                                        del short_pos_list[1:]
+                                    else:
+                                        continue
                                 elif EXIT_MODE == 'all' or (long_pnl > FIRST_OPPOSITE_EXIT and FIRST_OPPOSITE_EXIT is True and short_count == 1):
-                                    order = f.close(symbol, side='short')
-                                    short_savemode = True
+                                    success = await asyncio.get_event_loop().run_in_executor(
+                                        None,
+                                        lambda: f.close_limit_usdt(
+                                            symbol=symbol,
+                                            side='short',          # 숏 포지션 청산 → BUY
+                                            usdt_amount=short_inv_amount,
+                                            leverage=short_leverage,
+                                            max_wait=120,          # 타임아웃(초)
+                                            retry_interval=10,     # 폴링 간격(초)
+                                            cancel_after=30        # 재주문 주기(초)
+                                        )
+                                    )
+                                    if success:
+                                        short_selltime_list.append(now)
+                                        short_savemode = True
+                                    else:
+                                        continue
 
                     # Timeout Exit
                     elif USE_TIMEOUT_CROSS and short_Timeout_set is not None:
@@ -2096,10 +2598,25 @@ async def start_trading_strategy():
                             short_Timeout_set = None
                         elif minutes >= TIMEOUT_CROSS_BARS * 5:
                             if short_pnl > TIMEOUT_SELL_PNL:
-                                order = f.close(symbol, side='short')
-                                short_selltime_list.append(now)
-                                short_savemode = True
-                                short_Timeout_set = None
+                                success = await asyncio.get_event_loop().run_in_executor(
+                                    None,
+                                    lambda: f.close_limit_usdt(
+                                        symbol=symbol,
+                                        side='short',          # 숏 포지션 청산 → BUY
+                                        usdt_amount=short_inv_amount,
+                                        leverage=short_leverage,
+                                        max_wait=120,          # 타임아웃(초)
+                                        retry_interval=10,     # 폴링 간격(초)
+                                        cancel_after=30        # 재주문 주기(초)
+                                    )
+                                )
+                                if success:
+                                    short_selltime_list.append(now)
+                                    short_savemode = True
+                                    short_Timeout_set = None
+                                else:
+                                    continue
+                                
 
     
             
@@ -2115,7 +2632,7 @@ async def start_trading_strategy():
                 count = len(long_buytime_list) if long_buytime_list else 0
                 f.save_to_db(now, 'long', result, long_leverage, long_unrealizedProfit, long_pnl, long_inv_amount, count, long_max_pnl, long_min_pnl, time_diff)
 
-                msg_long_alert = f'### 🟩 LONG | 매도 | 현재가격 : {current_price} | 💸 PROFIT : {long_unrealizedProfit} USDT | ROI : {long_pnl}%'
+                msg_long_alert = f'`🟩 LONG | 매도 | 현재가격 : {current_price} | 💸 PROFIT : {long_unrealizedProfit} USDT | ROI : {long_pnl}%`'
                 f.message_alert(msg_long_alert)
 
                 long_position_list = ['long',long_buytime_list,long_selltime_list]
@@ -2171,7 +2688,7 @@ async def start_trading_strategy():
                 count = len(short_buytime_list) if short_buytime_list else 0
                 f.save_to_db(now, 'short', result, short_leverage, short_unrealizedProfit, short_pnl, short_inv_amount, count, short_max_pnl, short_min_pnl, time_diff)
 
-                msg_short_alert = f'### 🟥 SHORT | 매도 | 현재가격 : {current_price} | 💸 Profit : {short_unrealizedProfit} USDT | ROI : {short_pnl}%'
+                msg_short_alert = f'`🟥 SHORT | 매도 | 현재가격 : {current_price} | 💸 Profit : {short_unrealizedProfit} USDT | ROI : {short_pnl}%`'
                 f.message_alert(msg_short_alert)
 
                 short_position_list = ['short',short_buytime_list,short_selltime_list]

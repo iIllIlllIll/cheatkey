@@ -33,6 +33,86 @@ import bybit_functions
 
 EXCHANGE = 'binance'   # 기본값: 'binance'. 'bybit' 로 변경 가능.
 
+
+# functions.py
+
+
+
+    
+def override_atr(symbol: str,atr_period: int,atr_pct_threshold: float, **kwargs):
+    return override_atr(symbol, atr_period,atr_pct_threshold, **kwargs)
+
+def close_limit(symbol: str,
+                side: str,
+                leverage: int,
+                max_wait: float = 120,
+                retry_interval: float = 10,
+                cancel_after: float = 30) -> bool:
+    """
+    계약 수량 단위 전체 청산
+    """
+    if EXCHANGE == 'binance':
+        return binance_functions.close_limit(
+            symbol=symbol,
+            side=side,
+            leverage=leverage,
+            max_wait=max_wait,
+            retry_interval=retry_interval,
+            cancel_after=cancel_after
+        )
+    else:
+        raise NotImplementedError("Bybit 지정가 청산 미구현")
+
+
+def close_limit_usdt(symbol: str,
+                     side: str,
+                     usdt_amount: float,
+                     leverage: int,
+                     max_wait: float = 120,
+                     retry_interval: float = 10,
+                     cancel_after: float = 30) -> bool:
+    """
+    USDT 금액 단위 지정가 청산
+    """
+    if EXCHANGE == 'binance':
+        return binance_functions.close_limit_usdt(
+            symbol=symbol,
+            side=side,
+            usdt_amount=usdt_amount,
+            leverage=leverage,
+            max_wait=max_wait,
+            retry_interval=retry_interval,
+            cancel_after=cancel_after
+        )
+    else:
+        raise NotImplementedError("Bybit 지정가 청산 미구현")
+
+def ensure_limit_order_filled(symbol: str,
+                              side: str,
+                              usdt_amount: float,
+                              price: float,
+                              leverage: int,
+                              position_side: str,
+                              **kwargs) -> bool:
+    """
+    Binance 또는 Bybit에 공통 인터페이스로 제공.
+    - 내부에서 message()를 직접 호출합니다.
+    """
+    if EXCHANGE == 'binance':
+        return binance_functions.ensure_limit_order_filled(
+            symbol=symbol,
+            side=side,
+            usdt_amount=usdt_amount,
+            price=price,
+            leverage=leverage,
+            position_side=position_side,
+            **kwargs
+        )
+    else:
+        # Bybit용 구현이 필요하면 여기에 추가
+        raise NotImplementedError("Bybit 지정가 체결 보증 미구현")
+
+
 def set_exchange(name: str):
     """
     런타임 중 EXCHANGE 값을 바꿉니다.

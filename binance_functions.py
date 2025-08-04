@@ -238,51 +238,27 @@ def place_market_order(symbol: str, quantity: float, leverage: int, side: str):
         print(f"ERROR: {error_info}")
         raise RuntimeError(error_info)
 
-def place_limit_order(symbol: str, price: float, quantity: float, leverage: int, side: str):
+def place_limit_order(symbol: str,
+                      side: str,
+                      quantity: float,
+                      price: float,
+                      leverage: int,
+                      position_side: str) -> dict:
     """
-    지정가 주문을 실행하고 Binance API의 전체 응답 딕셔너리를 반환합니다.
-    실패 시에는 RuntimeError를 발생시킵니다.
+    position_side: 'LONG' 또는 'SHORT'
     """
-    # 레버리지 설정
-    set_leverage(symbol, leverage)
+    params = {
+        "symbol":       symbol,
+        "side":         side,
+        "type":         "LIMIT",
+        "timeInForce":  "GTC",
+        "quantity":     quantity,
+        "price":        price,
+        "positionSide": position_side
+    }
 
-    # 가격은 티크 사이즈에 맞게 반올림
-    adjusted_price = round_price_to_tick_size(symbol, price)
-    # 수량은 심볼별 step size에 맞게 반올림
-    adjusted_quantity = round_quantity_to_step_size(symbol, quantity)
-
-    if adjusted_quantity <= 0:
-        raise ValueError(f"Adjusted quantity {adjusted_quantity} is zero or negative for {symbol}.")
-    if adjusted_price <= 0:
-        raise ValueError(f"Adjusted price {adjusted_price} is zero or negative for {symbol}.")
-
-    # Binance 지정가 주문은 positionSide를 명시하지 않아도 되는 경우가 많지만, 헤지 모드에서는 명시하는 것이 좋습니다.
-    # Binance API 문서에 따라 positionSide는 생략하거나 명시합니다.
-    position_side = 'LONG' if side.upper() == 'BUY' else 'SHORT'
-
-    try:
-        order_response = client.futures_create_order(
-            symbol=symbol,
-            side=side,  # 'BUY' (롱) 또는 'SELL' (숏)
-            type='LIMIT',
-            timeInForce='GTC',  # Good Till Cancelled
-            price=adjusted_price, # 조정된 가격 사용
-            quantity=adjusted_quantity, # 조정된 수량 사용
-            positionSide=position_side # 헤지 모드에서 롱/숏 포지션 구분
-        )
-        print(f"DEBUG: Binance Limit order placed: {order_response}")
-        return order_response # 성공 시 전체 응답 반환
-
-    except Exception as e:
-        error_msg = str(e)
-        if hasattr(e, 'code') and hasattr(e, 'msg'):
-            error_info = f"Binance API Error {e.code}: {e.msg}"
-        else:
-            error_info = f"Binance API Error: {error_msg}"
-        
-        print(f"ERROR: {error_info}")
-        raise RuntimeError(error_info)
-
+    client.futures_change_leverage(symbol=symbol, leverage=leverage)
+    return client.futures_create_order(**params)
 
 
 def get_current_market_price(symbol):
@@ -334,27 +310,326 @@ def round_quantity_to_step_size(symbol, quantity):
     rounded_quantity = quantity_dec.quantize(step_dec, rounding=ROUND_DOWN)
     return float(rounded_quantity)
 
-# 주문 실행 함수 : 종목, 지정가격, 퍼센트(자산), 레버리지, 주문 방향(side)
-def execute_limit_order(symbol, price, percentage, leverage, side):  
+
+# binance_functions.py
+
+import time
+from binance.exceptions import BinanceAPIException
+
+# (기존 코드 생략)
+
+tick_size_map = {}
+try:
+    exch_info = client.futures_exchange_info()
+    for s in exch_info['symbols']:
+        # PRICE_FILTER에서 tickSize 추출
+        for f in s['filters']:
+            if f['filterType'] == 'PRICE_FILTER':
+                tick_size_map[s['symbol']] = float(f['tickSize'])
+                break
+except Exception as e:
+    # 로드 실패 시 빈 딕셔너리 유지
+    print(f"Tick size 로드 실패: {e}")
+
+def ensure_limit_order_filled(symbol: str,
+                              side: str,
+                              usdt_amount: float,
+                              price: float,
+                              leverage: int,
+                              position_side: str,
+                              max_wait: float = 120,
+                              retry_interval: float = 10,
+                              cancel_after: float = 30) -> bool:
     """
-    :param symbol: 거래 종목
-    :param price: 주문 가격
-    :param percentage: 자산의 몇 퍼센트를 주문할 것인지
-    :param leverage: 레버리지 값
-    :param side: 주문 방향 ('BUY' : 롱, 'SELL' : 숏)
+    헷지모드 대응:
+    - position_side ('LONG'|'SHORT')
     """
-    quantity = calculate_order_quantity(percentage)
-    price = round_price_to_tick_size(symbol, price)
-    min_qty = get_min_order_quantity(symbol)  # 최소 주문 수량 가져오기
-    if quantity >= min_qty:
-        # 주문 size 계산 : (자산의 금액 / 가격) * 레버리지
-        size = quantity / price * leverage
-        # 심볼에 따른 step size로 수량 반올림
-        size = round_quantity_to_step_size(symbol, size)
-        order = place_limit_order(symbol, price, size, leverage, side)
-        return order
-    else:
-        print(f"주문 수량이 최소 수량 ({min_qty})보다 적습니다.")
+    # 1) USDT → 계약 수량 환산
+    raw_qty   = usdt_amount / price * leverage
+    total_qty = round_qty(symbol, raw_qty)
+    if total_qty <= 0:
+        message(f"`[{symbol}] USDT 환산 수량이 0이하입니다.`")
+        return False
+
+    t_start = time.time()
+    t_order = t_start
+    tick    = tick_size_map[symbol]
+    prec    = int(-math.log10(tick))
+
+    # 2) 첫 지정가 주문 (헷지모드용 positionSide, reduceOnly)
+    try:
+        order = place_limit_order(
+            symbol=symbol,
+            side=side,
+            quantity=total_qty,
+            price=price,
+            leverage=leverage,
+            position_side=position_side
+        )
+    except BinanceAPIException as e:
+        message(f"`[{symbol}] 주문 실패 ❌: {e.message}`")
+        return False
+
+    order_id = order['orderId']
+
+    # 3) 폴링 & 재주문 루프
+    while True:
+        info     = client.futures_get_order(symbol=symbol, orderId=order_id)
+        executed = float(info.get('executedQty', 0))
+        remaining= total_qty - executed
+
+        if executed >= total_qty:
+            message(f"`[{symbol}] 전량 체결 완료 ✅ (ID={order_id}) executed={executed}`")
+            return True
+        if 0 < executed < total_qty:
+            message(f"`[{symbol}] 부분 체결 완료 ☑️ ID={order_id} executed={executed}, rem={remaining}`")
+
+        now = time.time()
+        if now - t_start > max_wait:
+            message(f"`[{symbol}] 타임아웃 ⛔ {max_wait}s 미체결 → 실패`")
+            return False
+
+        if now - t_order > cancel_after:
+            client.futures_cancel_order(symbol=symbol, orderId=order_id)
+
+            if remaining > 0:
+                # 호가 재계산
+                book     = client.futures_order_book(symbol=symbol, limit=5)
+                best_bid = float(book['bids'][0][0])
+                best_ask = float(book['asks'][0][0])
+                new_price = round((best_bid + tick) if side=="BUY" else (best_ask - tick), prec)
+
+                order = place_limit_order(
+                    symbol=symbol,
+                    side=side,
+                    quantity=remaining,
+                    price=new_price,
+                    leverage=leverage,
+                    position_side=position_side
+                )
+                order_id = order['orderId']
+                t_order  = now
+
+        time.sleep(retry_interval)
+
+
+def close_limit(symbol: str,
+                side: str,
+                leverage: int,
+                max_wait: float = 120,
+                retry_interval: float = 10,
+                cancel_after: float = 30) -> bool:
+    """
+    포지션 잔량이 완전히 0이 될 때까지 지정가→체결 보증 반복.
+    Dust(잔량 < stepSize) 단계에서는 시장가 주문으로 마무리 청산.
+    """
+    position_side = 'LONG' if side=='long' else 'SHORT'
+    order_side    = 'SELL' if side=='long' else 'BUY'
+
+    while True:
+        # 1) 남은 포지션 수량 조회
+        pos_info = client.futures_position_information(symbol=symbol)
+        qty = 0.0
+        for p in pos_info:
+            if p['symbol']==symbol and p['positionSide']==position_side:
+                qty = abs(float(p['positionAmt']))
+                break
+
+        # 완전 청산 완료
+        if qty <= 0:
+            message(f"`[{symbol}] 포지션 청산 완료 ✅`")
+            return True
+
+        # 2) stepSize, minQty 조회 (LOT_SIZE 필터에서)
+        info     = client.futures_exchange_info()
+        sym      = next(s for s in info['symbols'] if s['symbol']==symbol)
+        lot      = next(f for f in sym['filters'] if f['filterType']=='LOT_SIZE')
+        step     = float(lot['stepSize'])
+        min_qty  = float(lot['minQty'])
+        prec_qty = int(round(-math.log10(step), 0))
+
+        # 3) 청산 주문 단가 계산 (호가창 기반)
+        book = client.futures_order_book(symbol=symbol, limit=5)
+        tick = tick_size_map[symbol]
+        prec = int(round(-math.log10(tick), 0))
+        if side=='long':
+            px = float(book['asks'][0][0]) - tick
+        else:
+            px = float(book['bids'][0][0]) + tick
+        limit_price = round(px, prec)
+
+        # 4) Dust 체크: 남은 qty가 최소수량 미만이면 시장가로 마무리
+        if qty < min_qty:
+            try:
+                client.futures_change_leverage(symbol=symbol, leverage=leverage)
+                client.futures_create_order(
+                    symbol=symbol,
+                    side=order_side,
+                    type='MARKET',
+                    quantity=qty,
+                    positionSide=position_side
+                )
+                return True
+            except BinanceAPIException as e:
+                message(f"`[{symbol}] Dust 시장가 청산 실패: {e.message}`")
+                return False
+
+        # 5) 남은 전체 포지션 지정가 체결 보증
+        usdt_amount = qty * limit_price / leverage
+        success = ensure_limit_order_filled(
+            symbol=symbol,
+            side=order_side,
+            usdt_amount=usdt_amount,
+            price=limit_price,
+            leverage=leverage,
+            position_side=position_side,
+            max_wait=max_wait,
+            retry_interval=retry_interval,
+            cancel_after=cancel_after
+        )
+        if not success:
+            message(f"`[{symbol}] 지정가 청산 실패 ❌`")
+            return False
+
+        # 6) 아주 짧게 대기 후 반복
+        time.sleep(1)
+
+
+
+def close_limit_usdt(symbol: str,
+                     side: str,
+                     usdt_amount: float,
+                     leverage: int,
+                     max_wait: float = 120,
+                     retry_interval: float = 10,
+                     cancel_after: float = 30) -> bool:
+    """
+    USDT 단위 청산 → 포지션이 남아있으면 재시도
+    """
+    position_side = 'LONG' if side=='long' else 'SHORT'
+    order_side    = 'SELL' if side=='long' else 'BUY'
+
+    while True:
+        # 1) 남은 포지션 수량 조회
+        pos_info = client.futures_position_information(symbol=symbol)
+        qty = 0.0
+        for p in pos_info:
+            if p['symbol']==symbol and p['positionSide']==position_side:
+                qty = abs(float(p['positionAmt']))
+                break
+
+        if qty <= 0:
+            message(f"`[{symbol}] 포지션 청산 완료 ✅`")
+            return True
+
+        # 2) 단가 계산
+        book = client.futures_order_book(symbol=symbol, limit=5)
+        tick = tick_size_map[symbol]
+        prec = int(round(-math.log10(tick), 0))
+        if side=='long':
+            px = float(book['asks'][0][0]) - tick
+        else:
+            px = float(book['bids'][0][0]) + tick
+        limit_price = round(px, prec)
+
+        # 3) 요청받은 USDT 기준 재계산
+        #    (매번 usdt_amount 고정 → 원하는 만큼 반복 청산)
+        success = ensure_limit_order_filled(
+            symbol=symbol,
+            side=order_side,
+            usdt_amount=usdt_amount,
+            price=limit_price,
+            leverage=leverage,
+            position_side=position_side,
+            max_wait=max_wait,
+            retry_interval=retry_interval,
+            cancel_after=cancel_after
+        )
+        if not success:
+            message(f"`[{symbol}] USDT 청산 중 오류 발생 ❌`")
+            return False
+
+        # 남은 포지션이 다시 너무 작으면 종료
+        if qty * limit_price / leverage < tick:
+            return True
+
+        time.sleep(1)
+
+
+def override_atr(
+                              symbol: str,
+                              atr_period: int,
+                              atr_pct_threshold: float) -> bool:
+    """
+    바이낸스에서 symbol의 30분봉을 받아와,
+    가장 최근에 완결된 봉(=API가 반환하는 두 번째 마지막 candle)의 ATR%를 계산한 뒤
+    ATR% ≤ atr_pct_threshold 이면 True, 아니면 False 반환.
+
+    client: Binance futures client (e.g. from binance.client.Client)
+    symbol: 거래 심볼, 예: "XRPUSDT"
+    atr_period: ATR 계산에 사용할 기간 (e.g. 14)
+    atr_pct_threshold: 임계 ATR% (e.g. 1.0)
+    """
+    # 1) ATR 계산용으로 (atr_period + 2)개의 30분봉을 조회
+    klines = client.futures_klines(
+        symbol=symbol,
+        interval='30m',
+        limit=atr_period * 50
+    )
+
+    # 2) DataFrame으로 변환
+    df = pd.DataFrame(klines, columns=[
+        'open_time','open','high','low','close','volume',
+        'close_time','quote_asset_volume','num_trades',
+        'taker_buy_base','taker_buy_quote','ignore'
+    ])
+    df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
+    df[['open','high','low','close']] = df[['open','high','low','close']].astype(float)
+
+    # 3) True Range 계산
+    high_low        = df['high'] - df['low']
+    high_prev_close = (df['high'] - df['close'].shift(1)).abs()
+    low_prev_close  = (df['low']  - df['close'].shift(1)).abs()
+    df['tr']        = pd.concat([high_low, high_prev_close, low_prev_close], axis=1).max(axis=1)
+
+    # 4) ATR 및 ATR% 계산
+    df['atr']         = df['tr'].rolling(window=atr_period).mean()
+    df['atr_pct']     = df['atr'] / df['close'] * 100
+
+    # 5) 가장 최근 완결된 30분봉은 df.iloc[-2]
+    if len(df) < atr_period + 2:
+        # 데이터가 충분치 않으면 기본 False
+        return False
+
+    atr_pct_val = df['atr_pct'].iat[-2]
+    return atr_pct_val <= atr_pct_threshold
+
+def round_qty(symbol: str, raw_qty: float) -> float:
+    """
+    raw_qty를 해당 심볼의 LOT_SIZE.stepSize 단위로 내림(버림)하고,
+    필요 소수점 자리수에 맞춰 반올림하여 반환합니다.
+    예) stepSize=0.001, raw_qty=1.23456 → qty=1.234
+    """
+    # 1) 거래소 정보에서 심볼 필터 가져오기
+    info = client.futures_exchange_info()
+    sym_info = next((s for s in info['symbols'] if s['symbol'] == symbol), None)
+    if sym_info is None:
+        raise ValueError(f"Symbol not found in exchange_info: {symbol}")
+
+    # 2) LOT_SIZE 필터에서 stepSize 추출
+    lot_filter = next((f for f in sym_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
+    if lot_filter is None:
+        raise ValueError(f"LOT_SIZE filter not found for symbol: {symbol}")
+    step_size = float(lot_filter['stepSize'])
+
+    # 3) 몇 자리 소수점까지 써야 하는지 계산
+    precision = int(round(-math.log10(step_size), 0))
+
+    # 4) raw_qty를 step_size 단위로 내림 (floor)
+    qty = math.floor(raw_qty / step_size) * step_size
+
+    # 5) precision에 맞춰 반올림하여 반환
+    return round(qty, precision)
 
 def close(symbol, side='all'):
     try:
@@ -584,145 +859,153 @@ def get_latest_order(symbol):
         print(f"An error occurred: {e}")
         return None
     
-def cheatkey(symbol,
-             interval: str = '5m',
-             threshold: float = CHEATKEY_THRESHOLD,
-             lookback_n: int = CHEATKEY_LOOKBACK,
-             use_time_filter: bool = CHEATKEY_TIMEFILTER,
-             side: str = "long") -> bool:
+def cheatkey(
+    symbol,
+    interval: str = '5m',
+    threshold: float = CHEATKEY_THRESHOLD,
+    lookback_n: int = CHEATKEY_LOOKBACK,
+    use_time_filter: bool = CHEATKEY_TIMEFILTER,
+    side: str = "long"
+) -> bool:
     try:
         # --- 데이터 로드 & EMA 계산 ---
-        # 1) 데이터 로드
-        limit = max(lookback_n + 2, 50)
+        limit = max(lookback_n * 5, 50 * 10)
         klines = client.futures_klines(symbol=symbol, interval=interval, limit=limit)
         df = pd.DataFrame(klines, columns=[
             'open_time','open','high','low','close','volume',
             'close_time','quote_asset_volume','number_of_trades',
             'taker_buy_base_asset_volume','taker_buy_quote_asset_volume','ignore'
         ])
-
-        # 2) 타입 변환 & 시간 변환
         df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
         df[['open','high','low','close']] = df[['open','high','low','close']].astype(float)
-
-        # 3) EMA 계산
         df['ema12'] = df['close'].ewm(span=12, adjust=False).mean()
         df['ema26'] = df['close'].ewm(span=26, adjust=False).mean()
 
-        idx = len(df) - 1
+        # --- 직전 완전 종료된 5분봉 인덱스 ---
+        idx = len(df) - 2
 
-        # --- 1) 시간 필터: 무조건 0,15,30,45분에만 실행 ---
+        # 1) 시간 필터: 직전 봉의 open_time.minute 가 0,15,30,45 인지
         if use_time_filter:
             minute = df.at[idx, "open_time"].minute
-            if minute not in (0,5, 15,20, 30,35, 45,50):
+            if minute not in (0, 15, 30, 45):
                 return False
 
-        # --- 이하 기존 로직 (slope / noise / candle / diff) ---
-        # 2) 인덱스 유효성
+        # 2) 인덱스 유효성 확인
         if idx < lookback_n + 1:
             return False
 
-        # 3) EMA 및 기울기
-        c12, c26 = df.at[idx,'ema12'], df.at[idx,'ema26']
-        p12, p26 = df.at[idx-1,'ema12'], df.at[idx-1,'ema26']
-        slope12, slope26 = c12-p12, c26-p26
-        if side=="long" and (slope12<=0 or slope26<=0): return False
-        if side=="short" and (slope12>=0 or slope26>=0): return False
+        # 3) EMA slope 필터
+        c12, c26 = df.at[idx, 'ema12'], df.at[idx, 'ema26']
+        p12, p26 = df.at[idx-1, 'ema12'], df.at[idx-1, 'ema26']
+        print(c12, c26)
+        print(df.at[idx, "open_time"].minute)
+        slope12, slope26 = c12 - p12, c26 - p26
+        # if side == "long" and (slope12 <= 0 or slope26 <= 0):
+        #     return False
+        # if side == "short" and (slope12 >= 0 or slope26 >= 0):
+        #     return False
 
         # 4) 노이즈 필터
-        start = idx-lookback_n+1
-        for j in range(start, idx+1):
-            prev12, prev26 = df.at[j-1,'ema12'], df.at[j-1,'ema26']
-            curr12, curr26 = df.at[j,  'ema12'], df.at[j,  'ema26']
-            if side=="long"  and prev12>prev26 and curr12<curr26: return False
-            if side=="short" and prev12<prev26 and curr12>curr26: return False
+        start = idx - lookback_n + 1
+        for j in range(start, idx + 1):
+            prev12, prev26 = df.at[j-1, 'ema12'], df.at[j-1, 'ema26']
+            curr12, curr26 = df.at[j,   'ema12'], df.at[j,   'ema26']
+            
+            print(df.at[j, "open_time"].minute)
+            print(curr12, curr26)
+            print(prev12, prev26)
+            if side == "long" and prev12 > prev26 and curr12 < curr26:
+                return False
+            if side == "short" and prev12 < prev26 and curr12 > curr26:
+                return False
 
-        # 5) 캔들 조건
-        o, c = df.at[idx,'open'], df.at[idx,'close']
+        # 5) 캔들 필터
+        o, c = df.at[idx, 'open'], df.at[idx, 'close']
         block = df.iloc[start:idx+1]
-        if side=="long":
-            if not (c12<c26 and c>o and all(block['ema12']<block['ema26'])):
+        if side == "long":
+            if not (c12 < c26 and c > o and all(block['ema12'] < block['ema26'])):
                 return False
         else:
-            if not (c12>c26 and c<o and all(block['ema12']>block['ema26'])):
+            if not (c12 > c26 and c < o and all(block['ema12'] > block['ema26'])):
                 return False
 
-        # 6) EMA 차이 감소 & 임계값
-        curr_diff, prev_diff = abs(c12-c26), abs(p12-p26)
+        # 6) EMA 차이 필터 (직전 봉 대비 차이 감소 & threshold 이하)
+        curr_diff = abs(c12 - c26)
+        prev_diff = abs(p12 - p26)
         if curr_diff < prev_diff and curr_diff <= threshold:
             return True
+
         return False
 
     except Exception as e:
         print(f"cheatkey error: {e}")
         return False
 
-def emacross(symbol,
-             ema12_period: int = 12,
-             ema26_period: int = 26,
-             interval: str = '5m',
-             side: str = "long",
-             use_candle_condition: bool = False) -> bool:
+
+def emacross(
+    symbol: str,
+    ema12_period: int = 12,
+    ema26_period: int = 26,
+    interval: str = '5m',
+    side: str = "long",
+    use_candle_condition: bool = False
+) -> bool:
     """
-    EMA 골든/데드 크로스 신호.
-    
-    Parameters:
-    - symbol: 거래 심볼 (예: "XRPUSDT")
-    - ema12_period: 단기 EMA 기간
-    - ema26_period: 장기 EMA 기간
-    - interval: 캔들 간격 (기본 '5m')
-    - side: "long" (골든크로스) 또는 "short" (데드크로스)
-    - use_candle_condition: True 면 양봉/음봉 조건 적용
-    
-    Returns:
-    - bool: 진입/청산 신호 발생 여부
+    EMA 골든/데드 크로스 신호 (직전 완전 종료된 봉 사용).
+
+    - 항상 ‘마지막으로 완전 종료된’ 5분봉(idx = -2)과
+      그 이전 봉(idx = -3)을 검사합니다.
     """
     try:
         # 1) 데이터 가져오기
-        klines = client.futures_klines(symbol=symbol, interval=interval, limit=50)
+        klines = client.futures_klines(symbol=symbol, interval=interval, limit=250)
         df = pd.DataFrame(klines, columns=[
             'open_time','open','high','low','close','volume',
             'close_time','quote_asset_volume','number_of_trades',
             'taker_buy_base_asset_volume','taker_buy_quote_asset_volume','ignore'
         ])
-        
+
         # 2) 타입 변환
         df['open']  = df['open'].astype(float)
         df['close'] = df['close'].astype(float)
-        
+
         # 3) EMA 계산
         df['ema12'] = df['close'].ewm(span=ema12_period, adjust=False).mean()
         df['ema26'] = df['close'].ewm(span=ema26_period, adjust=False).mean()
-        
-        # 4) 직전과 현재 EMA
-        prev12, prev26 = df.iloc[-2][['ema12','ema26']]
-        curr12, curr26 = df.iloc[-1][['ema12','ema26']]
-        
-        # 5) 교차 여부 판단
+
+        # 4) 인덱스 설정: -1은 아직 진행 중인 봉이므로, -2와 -3 사용
+        curr_idx = len(df) - 2   # 마지막 완전 종료된 봉
+        prev_idx = curr_idx - 1  # 그 이전 봉
+
+        # 5) EMA 값 가져오기
+        prev12, prev26 = df.at[prev_idx, 'ema12'], df.at[prev_idx, 'ema26']
+        curr12, curr26 = df.at[curr_idx, 'ema12'], df.at[curr_idx, 'ema26']
+
+        # 6) 교차 여부 판단
         if side == "long":
             crossed = (prev12 < prev26) and (curr12 > curr26)
         elif side == "short":
             crossed = (prev12 > prev26) and (curr12 < curr26)
         else:
             raise ValueError("side는 'long' 또는 'short'이어야 합니다.")
-        
         if not crossed:
             return False
-        
-        # 6) 선택적 캔들 조건
+
+        # 7) 선택적 캔들 조건 (바로 직전 완전 종료된 봉 사용)
         if use_candle_condition:
-            o = df.iloc[-1]['open']
-            c = df.iloc[-1]['close']
+            o = df.at[curr_idx, 'open']
+            c = df.at[curr_idx, 'close']
             if side == "long" and c <= o:
                 return False
             if side == "short" and c >= o:
                 return False
-        
+
         return True
-    
+
     except Exception as e:
         print(f"emacross error: {e}")
         return False
+
 
 
 def change_position_mode(dualSidePosition: bool):
